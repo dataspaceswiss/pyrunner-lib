@@ -10,7 +10,7 @@ import polars as pl
 import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
-import input_source_tracer as ist
+from . import input_source_tracer as ist
 import warnings
 
 warnings.filterwarnings(
@@ -58,7 +58,9 @@ def write_column_trace_file(lf: pl.LazyFrame, transform_id: str, base_path: str)
     origins = ist.trace_input_sources(serial_plan)
 
     try:
-        with open(f'{base_path}/data/{transform_id}/meta/columns.json', "w") as f:
+        trace_file_path = f'{base_path}/data/{transform_id}/meta/columns.json'
+        os.makedirs(os.path.dirname(trace_file_path), exist_ok=True)
+        with open(trace_file_path, "w") as f:
             json.dump(origins, f, indent=4)
     except Exception as e:
         print(f"Failed to write column trace file: {e}", file=sys.stderr)
@@ -170,7 +172,7 @@ def transform(transform_id: str, base_path: str = "") -> None:
     write_df_to_parquet(result, output_path, transform_conn.id, base_path)
     write_time = time.time() - start_time
 
-    print("--------- Build successfull ---------")
+    print("--------- Build successful ---------")
     print(f"Read Time:      {read_time:.2f} sec")
     print(f"Transform Time: {transform_time:.2f} sec")
     print(f"Write Time:     {write_time:.2f} sec")
