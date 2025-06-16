@@ -82,8 +82,7 @@ def write_df_to_parquet(df: Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame], fil
         if isinstance(df, pl.LazyFrame):
             # If it's a LazyFrame, collect it first
             write_column_trace_file(df, transform_id, base_path)
-            df = df.collect()
-            df.write_parquet(file_path)
+            df.sink_parquet(file_path)
         elif isinstance(df, pl.DataFrame):
             # If it's a Polars DataFrame, write directly
             df.write_parquet(file_path)
