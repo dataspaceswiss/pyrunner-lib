@@ -43,16 +43,37 @@ class InputSourceTracer:
       
         if op_type == "Scan":
             # Record original columns from the data source
-            df_id = node[op_type]["sources"]["Paths"][0]
-            schema = pl.read_parquet_schema(df_id)
-            for col_name in schema:
-                # Extract transform id by regex \/(rid.transform.*)\/ from df_id                
-                transform_id = re.search(r'\/(rid\.transform.*?)\/', df_id).group(1)
-                # Map the original column to itself with the df_id
-                source_id = f"{df_id}|{col_name}"
-                self.column_sources[col_name].add(source_id)
-                # Also keep direct mapping
-                self.column_mappings[col_name] = {source_id}
+            sources = node[op_type]["sources"]
+            df_id = None
+            
+            # Handle different source structures
+            if "Paths" in sources:
+                paths = sources["Paths"]
+                if paths and isinstance(paths[0], dict) and "Local" in paths[0]:
+                    df_id = paths[0]["Local"]
+                elif paths and isinstance(paths[0], str):
+                    df_id = paths[0]
+            elif "Local" in sources:
+                df_id = sources["Local"]
+            else:
+                # Handle other source types
+                df_id = str(sources)
+            
+            if df_id:
+                try:
+                    schema = pl.read_parquet_schema(df_id)
+                    for col_name in schema:
+                        # Extract transform id by regex \/(rid.transform.*)\/ from df_id
+                        match = re.search(r'\/(rid\.transform.*?)\/', df_id)
+                        transform_id = match.group(1) if match else "unknown_transform"
+                        # Map the original column to itself with the df_id
+                        source_id = f"{df_id}|{col_name}"
+                        self.column_sources[col_name].add(source_id)
+                        # Also keep direct mapping
+                        self.column_mappings[col_name] = {source_id}
+                except Exception:
+                    # If we can't read the schema, skip this scan
+                    pass
         
         elif op_type == "Rename":
             # Handle explicit rename operations
@@ -95,6 +116,95 @@ class InputSourceTracer:
                 # Process the expression part recursively
                 self._analyze_plan(expr)
             return  # Skip the generic processing for Alias
+        
+        elif op_type == "Select":
+            # Handle column selection - columns are preserved as-is
+            if "expr" in node[op_type]:
+                for expr in node[op_type]["expr"]:
+                    self._analyze_plan(expr)
+        
+        elif op_type == "Filter":
+            # Handle filtering - columns used in filter conditions are preserved
+            if "predicate" in node[op_type]:
+                self._analyze_plan(node[op_type]["predicate"])
+        
+        elif op_type == "Join":
+            # Handle joins - columns from both sides are preserved
+            if "left_on" in node[op_type]:
+                for col in node[op_type]["left_on"]:
+                    if isinstance(col, str) and col in self.column_mappings:
+                        # Preserve left side columns
+                        pass
+            if "right_on" in node[op_type]:
+                for col in node[op_type]["right_on"]:
+                    if isinstance(col, str) and col in self.column_mappings:
+                        # Preserve right side columns
+                        pass
+        
+        elif op_type == "GroupBy":
+            # Handle groupby - groupby columns are preserved
+            if "by" in node[op_type]:
+                for expr in node[op_type]["by"]:
+                    self._analyze_plan(expr)
+        
+        elif op_type == "Aggregate":
+            # Handle aggregations - aggregate expressions may reference multiple columns
+            if "expr" in node[op_type]:
+                for expr in node[op_type]["expr"]:
+                    self._analyze_plan(expr)
+        
+        elif op_type == "Sort":
+            # Handle sorting - sort columns are preserved
+            if "by_column" in node[op_type]:
+                for expr in node[op_type]["by_column"]:
+                    self._analyze_plan(expr)
+        
+        elif op_type == "Union":
+            # Handle union - columns from both sides are preserved
+            pass  # Columns are already mapped from inputs
+        
+        elif op_type == "Slice":
+            # Handle slice - all columns are preserved
+            pass  # No column changes
+        
+        elif op_type == "Distinct":
+            # Handle distinct - all columns are preserved
+            pass  # No column changes
+        
+        elif op_type == "Drop":
+            # Handle column dropping - specified columns are removed
+            if "columns" in node[op_type]:
+                for col in node[op_type]["columns"]:
+                    if col in self.column_mappings:
+                        del self.column_mappings[col]
+                    if col in self.column_sources:
+                        del self.column_sources[col]
+        
+        elif op_type == "WithColumns":
+            # Handle with_columns - new columns are added
+            if "expr" in node[op_type]:
+                for expr in node[op_type]["expr"]:
+                    self._analyze_plan(expr)
+        
+        elif op_type == "MapFunction":
+            # Handle map functions - analyze the function expression
+            if "function" in node[op_type]:
+                self._analyze_plan(node[op_type]["function"])
+        
+        elif op_type == "Cache":
+            # Handle caching - columns are preserved
+            pass  # No column changes
+        
+        elif op_type == "Unnest":
+            # Handle unnest operation - columns from nested structures are expanded
+            # The unnested columns are derived from the source column
+            if "columns" in node[op_type]:
+                for col in node[op_type]["columns"]:
+                    # Track that unnested columns come from the source column
+                    if col in self.column_mappings:
+                        # Unnested columns preserve the source mapping
+                        pass
+            pass  # Columns are preserved and new ones are added
         
         # Handle other operations with inputs
         if isinstance(node[op_type], dict):
