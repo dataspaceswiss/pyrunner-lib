@@ -160,7 +160,36 @@ class InputSourceTracer:
                     self._analyze_plan(expr)
         
         elif op_type == "Union":
-            # Handle union - columns from both sides are preserved
+            # Handle union - columns from all inputs are preserved and merged
+            if "inputs" in node[op_type]:
+                # Store current column mappings before processing inputs
+                original_mappings = self.column_mappings.copy()
+                original_sources = self.column_sources.copy()
+                
+                # Process each input and merge the results
+                for i, input_node in enumerate(node[op_type]["inputs"]):
+                    # Reset mappings for each input to avoid conflicts
+                    self.column_mappings = {}
+                    self.column_sources = defaultdict(set)
+                    
+                    # Process this input
+                    self._analyze_plan(input_node, op_type)
+                    
+                    # Merge the results from this input
+                    for col, sources in self.column_sources.items():
+                        original_sources[col].update(sources)
+                    for col, mappings in self.column_mappings.items():
+                        if col not in original_mappings:
+                            original_mappings[col] = set()
+                        original_mappings[col].update(mappings)
+                
+                # Restore the merged mappings
+                self.column_mappings = original_mappings
+                self.column_sources = original_sources
+                return  # Skip the generic input processing
+        
+        elif op_type == "HConcat":
+            # Handle horizontal concatenation - columns from all inputs are preserved
             pass  # Columns are already mapped from inputs
         
         elif op_type == "Slice":
@@ -205,6 +234,43 @@ class InputSourceTracer:
                         # Unnested columns preserve the source mapping
                         pass
             pass  # Columns are preserved and new ones are added
+        
+        elif op_type == "Explode":
+            # Handle explode operation - list columns are exploded into rows
+            # The exploded columns preserve their source mapping
+            pass  # Columns are preserved, just exploded
+        
+        elif op_type == "Cast":
+            # Handle cast operation - column types are changed but sources preserved
+            pass  # Columns are preserved with same sources
+        
+        elif op_type == "FillNan":
+            # Handle fill NaN operation - columns are preserved with same sources
+            pass  # Columns are preserved with same sources
+        
+        elif op_type == "GatherEvery":
+            # Handle gather every operation - rows are sampled but columns preserved
+            pass  # Columns are preserved with same sources
+        
+        elif op_type == "Interpolate":
+            # Handle interpolate operation - values are interpolated but columns preserved
+            pass  # Columns are preserved with same sources
+        
+        elif op_type == "MatchToSchema":
+            # Handle match to schema operation - schema is matched but columns preserved
+            pass  # Columns are preserved with same sources
+        
+        elif op_type == "MergeSorted":
+            # Handle merge sorted operation - similar to join, columns from both sides preserved
+            pass  # Columns are preserved from both inputs
+        
+        elif op_type == "Quantile":
+            # Handle quantile operation - statistical operation, columns preserved
+            pass  # Columns are preserved with same sources
+        
+        elif op_type in ["Std", "Var", "Mean", "Sum", "Min", "Max", "Count", "NullCount"]:
+            # Handle statistical operations - columns are preserved
+            pass  # Columns are preserved with same sources
         
         # Handle other operations with inputs
         if isinstance(node[op_type], dict):

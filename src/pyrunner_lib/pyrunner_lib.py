@@ -85,6 +85,26 @@ CONNECTIONS_FILE = "_connections.json"
 CONFIG: Optional[Config] = None
 CONNECTIONS: Optional[List[Connection]] = None
 DF_TYPE: Optional[str] = None
+DS_META_DATA: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def load_ds_meta() -> None:
+    """Load DS_META data from environment variable."""
+    global DS_META_DATA
+    try:
+        ds_meta_json = os.environ.get('DS_META')
+        if ds_meta_json:
+            ds_meta_list = json.loads(ds_meta_json)
+            # Convert list to dict keyed by TransformId for easy lookup
+            DS_META_DATA = {item['TransformId']: item for item in ds_meta_list}
+        else:
+            DS_META_DATA = {}
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"Warning: Failed to parse DS_META environment variable: {e}", file=sys.stderr)
+        DS_META_DATA = {}
+    except Exception as e:
+        print(f"Warning: Unexpected error loading DS_META: {e}", file=sys.stderr)
+        DS_META_DATA = {}
 
 
 def load_configuration() -> None:
@@ -184,40 +204,42 @@ def read_parquet_files(connections: Dict[str, Connection], params: List[str], ba
                     df = pd.read_parquet(file_path, engine='pyarrow')
                 
                 # Inject ds_meta attribute into the dataframe
-                if transform_id is not None:
-                    # Create a lazy property for previous_lf that only scans when accessed
-                    class LazyPreviousLF:
-                        def __init__(self, transform_id, base_path):
-                            self.transform_id = transform_id
-                            self.base_path = base_path
-                            self._lf = None
-                        
-                        def _load_previous(self):
-                            if self._lf is None:
-                                previous_path = f'{self.base_path}/data/{self.transform_id}/datasets/data.parquet'
-                                try:
-                                    self._lf = pl.scan_parquet(previous_path)
-                                except Exception:
-                                    # Return None if previous parquet doesn't exist
-                                    self._lf = None
-                            return self._lf
-                        
-                        @property
-                        def value(self):
-                            return self._load_previous()
-                    
+                if transform_id is not None:                                                                                       
                     # Create a custom class for ds_meta with dot notation access
                     class DSMeta:
-                        def __init__(self, transform_id, base_path):
+                        def __init__(self, transform_id, base_path, ds_meta_data=None):
                             self.transform_id = transform_id
                             self.artifact_dir = f"/data/{transform_id}/artifacts"
-                            self._lazy_previous = LazyPreviousLF(transform_id, base_path)
-                        
-                        @property
-                        def previous_lf(self):
-                            return self._lazy_previous.value
+                            
+                            # Add DS_META data if available
+                            if ds_meta_data:
+                                self.id = ds_meta_data.get('Id')
+                                self.build_id = ds_meta_data.get('BuildId')
+                                self.row_count = ds_meta_data.get('RowCount')
+                                self.column_count = ds_meta_data.get('ColumnCount')
+                                self.file_size = ds_meta_data.get('FileSize')
+                                self.schema = ds_meta_data.get('Schema')
+                                self.creation_date = ds_meta_data.get('CreationDate')
+                                
+                                # Add schema columns for easy access
+                                if self.schema and 'Columns' in self.schema:
+                                    self.columns = self.schema['Columns']
+                                else:
+                                    self.columns = []
+                            else:
+                                # Default values when DS_META is not available
+                                self.id = None
+                                self.build_id = None
+                                self.row_count = None
+                                self.column_count = None
+                                self.file_size = None
+                                self.schema = None
+                                self.creation_date = None
+                                self.columns = []
                     
-                    df.ds_meta = DSMeta(transform_id, base_path)
+                    # Get DS_META data for this transform
+                    ds_meta_data = DS_META_DATA.get(transform_id) if DS_META_DATA else None
+                    df.ds_meta = DSMeta(transform_id, base_path, ds_meta_data)
                 
                 data_dict[param] = df
             except Exception as e:
@@ -230,8 +252,9 @@ def read_parquet_files(connections: Dict[str, Connection], params: List[str], ba
 def transform(transform_id: str, base_path: str = "") -> None:
     """Main function to execute the transformation process."""
     try:
-        # Load configuration
+        # Load configuration and DS_META data
         load_configuration()
+        load_ds_meta()
         
         if CONNECTIONS is None:
             raise ConfigurationError("Connections not loaded")
