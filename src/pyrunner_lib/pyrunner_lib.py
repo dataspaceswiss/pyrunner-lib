@@ -207,13 +207,13 @@ def read_parquet_files(connections: Dict[str, Connection], params: List[str], ba
                 if transform_id is not None:                                                                                       
                     # Create a custom class for ds_meta with dot notation access
                     class DSMeta:
-                        def __init__(self, transform_id, base_path, ds_meta_data=None):
+                        def __init__(self, transform_id, ds_meta_data=None):
                             self.transform_id = transform_id
                             self.artifact_dir = f"/data/{transform_id}/artifacts"
                             
                             # Add DS_META data if available
                             if ds_meta_data:
-                                self.id = ds_meta_data.get('Id')
+                                self.data_snapshot_id = ds_meta_data.get('Id')
                                 self.build_id = ds_meta_data.get('BuildId')
                                 self.row_count = ds_meta_data.get('RowCount')
                                 self.column_count = ds_meta_data.get('ColumnCount')
@@ -228,7 +228,7 @@ def read_parquet_files(connections: Dict[str, Connection], params: List[str], ba
                                     self.columns = []
                             else:
                                 # Default values when DS_META is not available
-                                self.id = None
+                                self.data_snapshot_id = None
                                 self.build_id = None
                                 self.row_count = None
                                 self.column_count = None
@@ -237,9 +237,9 @@ def read_parquet_files(connections: Dict[str, Connection], params: List[str], ba
                                 self.creation_date = None
                                 self.columns = []
                     
-                    # Get DS_META data for this transform
-                    ds_meta_data = DS_META_DATA.get(transform_id) if DS_META_DATA else None
-                    df.ds_meta = DSMeta(transform_id, base_path, ds_meta_data)
+                    # Get DS_META data for this connection (data snapshot)
+                    ds_meta_data = DS_META_DATA.get(conn.id) if DS_META_DATA else None
+                    df.ds_meta = DSMeta(conn.id, ds_meta_data)
                 
                 data_dict[param] = df
             except Exception as e:

@@ -401,6 +401,8 @@ class TestInputSourceTracer:
             # Unnest should preserve all columns
             # The unnested struct columns (name, age) should be tracked back to person
             assert "id" in tracer.column_sources or "id" in tracer.column_mappings
+            assert any("name" in source for source in tracer.column_mappings["person"])
+            assert any("age" in source for source in tracer.column_mappings["person"])
             # At least some columns should be tracked
             assert len(tracer.column_sources) > 0 or len(tracer.column_mappings) > 0
         finally:
