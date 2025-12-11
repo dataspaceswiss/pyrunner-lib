@@ -131,7 +131,7 @@ class TestWriteColumnTraceFile:
             # Create a simple LazyFrame
             df = pl.LazyFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
             
-            with patch('pyrunner_lib.pyrunner_lib.ist.trace_input_sources') as mock_trace:
+            with patch('pyrunner_lib.pyrunner_lib.trace_input_sources') as mock_trace:
                 mock_trace.return_value = {"a": ["source1"], "b": ["source2"]}
                 
                 write_column_trace_file(df, "test_transform", temp_dir)

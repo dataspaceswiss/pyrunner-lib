@@ -10,7 +10,8 @@ import polars as pl
 import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
-from . import input_source_tracer as ist
+from .input_source_tracer import trace_input_sources
+from .health_check import run_health_checks
 import warnings
 
 
@@ -125,7 +126,7 @@ def write_column_trace_file(lf: pl.LazyFrame, transform_id: str, base_path: str)
     """Write column trace file with proper error handling."""
     try:
         serial_plan = lf.serialize(format="json")
-        origins = ist.trace_input_sources(serial_plan)
+        origins = trace_input_sources(serial_plan)
 
         trace_file_path = f'{base_path}/data/{transform_id}/meta/columns.json'
         os.makedirs(os.path.dirname(trace_file_path), exist_ok=True)
