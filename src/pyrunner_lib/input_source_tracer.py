@@ -1,437 +1,446 @@
+"""
+Input Source Tracer for Polars LazyFrame Plans.
+
+This module traces column lineage through Polars LazyFrame query plans,
+mapping each output column back to its original source columns and files.
+"""
+
 import json
-import hashlib
 import re
 from typing import Dict, List, Set, Any, Optional
 from collections import defaultdict
 import polars as pl
 
+
 class InputSourceTracer:
+    """
+    Traces column sources through a Polars LazyFrame JSON plan.
+    
+    Uses bottom-up traversal: processes child nodes first, then propagates
+    column source information upward through the plan tree.
+    """
+    
     def __init__(self, json_plan: str):
         """Initialize with a JSON string representing a Polars lazy query plan."""
         self.plan = json.loads(json_plan)
-        # Map output columns to their source columns with dataframe identifiers
-        self.column_sources = defaultdict(set)
-        # Track dataframe scans to assign unique IDs
-        self.dataframe_scans = {}
-        self.df_counter = 0
-        # Track intermediate column mappings
-        self.column_mappings = {}
-        # Track unnest operations to map unnested columns back to source
-        self.unnest_mappings = {}
-        # Start the analysis
+        # Map output columns to their source columns: {col_name: {source_id, ...}}
+        # Source ID format: "file_path|column_name"
+        self.column_sources: Dict[str, Set[str]] = defaultdict(set)
+        
+        # Analyze the plan
         self._analyze_plan(self.plan)
-        # Resolve all mappings to find original sources
-        self._resolve_all_mappings()
-
-    def _get_df_id(self, df_node):
-        """Generate a unique identifier for a dataframe scan."""
-        df_hash = hashlib.md5(json.dumps(df_node, sort_keys=True).encode()).hexdigest()
-        if df_hash not in self.dataframe_scans:
-            self.dataframe_scans[df_hash] = f"df_{self.df_counter}"
-            self.df_counter += 1
-        return df_hash
-
-    def _analyze_plan(self, node: Dict[str, Any], parent_op: Optional[str] = None) -> None:
-        """Recursively analyze the query plan to track column sources."""
-        if not isinstance(node, dict):
-            return
-            
-        op_types = list(node.keys())
-        if not op_types:
-            return
-            
-        op_type = op_types[0]
+    
+    def _get_source_id(self, file_path: str, column_name: str) -> str:
+        """Create a source identifier for a column from a file."""
+        return f"{file_path}|{column_name}"
+    
+    def _parse_source_id(self, source_id: str) -> tuple:
+        """Parse a source ID into (file_path, column_name)."""
+        parts = source_id.rsplit('|', 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, source_id
+    
+    def _analyze_plan(self, node: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """
+        Recursively analyze the query plan to track column sources.
         
-      
+        Returns a dict mapping column names to their source IDs for this subtree.
+        This enables bottom-up propagation of source information.
+        """
+        if not isinstance(node, dict) or not node:
+            return {}
+        
+        op_type = next(iter(node.keys()))
+        op_data = node[op_type]
+        
+        # Handle each operation type
         if op_type == "Scan":
-            # Record original columns from the data source
-            sources = node[op_type]["sources"]
-            df_id = None
-            
-            # Handle different source structures
-            if "Paths" in sources:
-                paths = sources["Paths"]
-                if paths and isinstance(paths[0], dict) and "Local" in paths[0]:
-                    df_id = paths[0]["Local"]
-                elif paths and isinstance(paths[0], str):
-                    df_id = paths[0]
-            elif "Local" in sources:
-                df_id = sources["Local"]
-            else:
-                # Handle other source types
-                df_id = str(sources)
-            
-            if df_id:
-                try:
-                    schema = pl.read_parquet_schema(df_id)
-                    for col_name in schema:
-                        # Extract transform id by regex \/(rid.transform.*)\/ from df_id
-                        match = re.search(r'\/(rid\.transform.*?)\/', df_id)
-                        transform_id = match.group(1) if match else "unknown_transform"
-                        # Map the original column to itself with the df_id
-                        source_id = f"{df_id}|{col_name}"
-                        self.column_sources[col_name].add(source_id)
-                        # Also keep direct mapping
-                        self.column_mappings[col_name] = {source_id}
-                except Exception:
-                    # If we can't read the schema, skip this scan
-                    pass
-        
-        elif op_type == "Rename":
-            # Handle explicit rename operations
-            if "existing" in node[op_type] and "new" in node[op_type]:
-                for old_name, new_name in zip(node[op_type]["existing"], node[op_type]["new"]):
-                    if old_name in self.column_mappings:
-                        self.column_mappings[new_name] = self.column_mappings[old_name].copy()
-                    else:
-                        # If we don't have a mapping yet, create a placeholder
-                        self.column_mappings[new_name] = {old_name}
-        
-        elif op_type == "Alias":
-            # Track column aliases - Alias is a list [expression, name]
-            if isinstance(node[op_type], list) and len(node[op_type]) == 2:
-                expr, alias_name = node[op_type]
-                
-                # Check if the expression refers directly to a column
-                if isinstance(expr, dict) and "Column" in expr:
-                    source_col = expr["Column"]
-                    if source_col in self.column_mappings:
-                        self.column_mappings[alias_name] = self.column_mappings[source_col].copy()
-                    else:
-                        # If we don't have a mapping yet, create a placeholder
-                        self.column_mappings[alias_name] = {source_col}
-                
-                # Check for expressions that combine multiple columns
-                elif isinstance(expr, dict):
-                    # Extract all column references from the expression
-                    source_cols = self._extract_columns_from_expr(expr)
-                    if source_cols:
-                        # Collect all sources for these columns
-                        all_sources = set()
-                        for col in source_cols:
-                            if col in self.column_mappings:
-                                all_sources.update(self.column_mappings[col])
-                            else:
-                                all_sources.add(col)  # Use as is if not mapped yet
-                        self.column_mappings[alias_name] = all_sources
-                
-                # Process the expression part recursively
-                self._analyze_plan(expr)
-            return  # Skip the generic processing for Alias
-        
+            return self._handle_scan(op_data)
         elif op_type == "Select":
-            # Handle column selection - columns are preserved as-is
-            if "expr" in node[op_type]:
-                for expr in node[op_type]["expr"]:
-                    self._analyze_plan(expr)
-        
+            return self._handle_select(op_data)
         elif op_type == "Filter":
-            # Handle filtering - columns used in filter conditions are preserved
-            if "predicate" in node[op_type]:
-                self._analyze_plan(node[op_type]["predicate"])
-        
+            return self._handle_filter(op_data)
         elif op_type == "Join":
-            # Handle joins - columns from both sides are preserved
-            if "left_on" in node[op_type]:
-                for col in node[op_type]["left_on"]:
-                    if isinstance(col, str) and col in self.column_mappings:
-                        # Preserve left side columns
-                        pass
-            if "right_on" in node[op_type]:
-                for col in node[op_type]["right_on"]:
-                    if isinstance(col, str) and col in self.column_mappings:
-                        # Preserve right side columns
-                        pass
-        
-        elif op_type == "GroupBy":
-            # Handle groupby - groupby columns are preserved
-            if "by" in node[op_type]:
-                for expr in node[op_type]["by"]:
-                    self._analyze_plan(expr)
-        
-        elif op_type == "Aggregate":
-            # Handle aggregations - aggregate expressions may reference multiple columns
-            if "expr" in node[op_type]:
-                for expr in node[op_type]["expr"]:
-                    self._analyze_plan(expr)
-        
-        elif op_type == "Sort":
-            # Handle sorting - sort columns are preserved
-            if "by_column" in node[op_type]:
-                for expr in node[op_type]["by_column"]:
-                    self._analyze_plan(expr)
-        
+            return self._handle_join(op_data)
         elif op_type == "Union":
-            # Handle union - columns from all inputs are preserved and merged
-            if "inputs" in node[op_type]:
-                # Store current column mappings before processing inputs
-                original_mappings = self.column_mappings.copy()
-                original_sources = self.column_sources.copy()
-                
-                # Process each input and merge the results
-                for i, input_node in enumerate(node[op_type]["inputs"]):
-                    # Reset mappings for each input to avoid conflicts
-                    self.column_mappings = {}
-                    self.column_sources = defaultdict(set)
-                    
-                    # Process this input
-                    self._analyze_plan(input_node, op_type)
-                    
-                    # Merge the results from this input
-                    for col, sources in self.column_sources.items():
-                        original_sources[col].update(sources)
-                    for col, mappings in self.column_mappings.items():
-                        if col not in original_mappings:
-                            original_mappings[col] = set()
-                        original_mappings[col].update(mappings)
-                
-                # Restore the merged mappings
-                self.column_mappings = original_mappings
-                self.column_sources = original_sources
-                return  # Skip the generic input processing
-        
+            return self._handle_union(op_data)
         elif op_type == "HConcat":
-            # Handle horizontal concatenation - columns from all inputs are preserved
-            pass  # Columns are already mapped from inputs
-        
-        elif op_type == "Slice":
-            # Handle slice - all columns are preserved
-            pass  # No column changes
-        
-        elif op_type == "Distinct":
-            # Handle distinct - all columns are preserved
-            pass  # No column changes
-        
-        elif op_type == "Drop":
-            # Handle column dropping - specified columns are removed
-            if "columns" in node[op_type]:
-                for col in node[op_type]["columns"]:
-                    if col in self.column_mappings:
-                        del self.column_mappings[col]
-                    if col in self.column_sources:
-                        del self.column_sources[col]
-        
-        elif op_type == "WithColumns":
-            # Handle with_columns - new columns are added
-            if "expr" in node[op_type]:
-                for expr in node[op_type]["expr"]:
-                    self._analyze_plan(expr)
-        
+            return self._handle_hconcat(op_data)
         elif op_type == "MapFunction":
-            # Handle map functions - analyze the function expression
-            if "function" in node[op_type]:
-                function_node = node[op_type]["function"]
-                # Check if this is an Unnest operation
-                if "Unnest" in function_node:
-                    # Handle unnest operation within MapFunction
-                    unnest_node = function_node["Unnest"]
-                    if "Union" in unnest_node:
-                        union_data = unnest_node["Union"]
-                        if isinstance(union_data, list) and len(union_data) > 0:
-                            first_union = union_data[0]
-                            if "ByName" in first_union and "names" in first_union["ByName"]:
-                                columns_to_unnest = first_union["ByName"]["names"]
-                                for col in columns_to_unnest:
-                                    # Store the source column for later resolution
-                                    if col not in self.column_mappings:
-                                        self.column_mappings[col] = {col}
-                                    # Track that this column was unnested from the source
-                                    self.unnest_mappings[col] = col
-                else:
-                    # Handle other map functions
-                    self._analyze_plan(function_node)
-        
+            return self._handle_map_function(op_data)
+        elif op_type == "GroupBy":
+            return self._handle_groupby(op_data)
+        elif op_type == "Aggregate":
+            return self._handle_aggregate(op_data)
+        elif op_type == "Sort":
+            return self._handle_passthrough(op_data)
+        elif op_type == "Slice":
+            return self._handle_passthrough(op_data)
+        elif op_type == "Distinct":
+            return self._handle_passthrough(op_data)
         elif op_type == "Cache":
-            # Handle caching - columns are preserved
-            pass  # No column changes
+            return self._handle_passthrough(op_data)
+        elif op_type == "WithColumns":
+            return self._handle_with_columns(op_data)
+        else:
+            # Generic handler for unknown operations with input
+            return self._handle_generic(op_data)
+    
+    def _handle_scan(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle Scan operation - the leaf node that reads from files."""
+        sources = op_data.get("sources", {})
+        file_path = None
         
-        elif op_type == "Unnest":
-            # Handle unnest operation - columns from nested structures are expanded
-            # The unnested columns are derived from the source column
-            if "Union" in node[op_type]:
-                # Handle the Union structure that contains the columns to unnest
-                union_data = node[op_type]["Union"]
-                if isinstance(union_data, list) and len(union_data) > 0:
-                    # The first element contains the columns to unnest
-                    first_union = union_data[0]
-                    if "ByName" in first_union and "names" in first_union["ByName"]:
-                        columns_to_unnest = first_union["ByName"]["names"]
-                        for col in columns_to_unnest:
-                            # Store the source column for later resolution
-                            # We'll need to map the unnested columns back to this source
-                            if col not in self.column_mappings:
-                                self.column_mappings[col] = {col}
+        # Extract file path from various source structures
+        if "Paths" in sources:
+            paths = sources["Paths"]
+            if paths and isinstance(paths[0], dict) and "Local" in paths[0]:
+                file_path = paths[0]["Local"]
+            elif paths and isinstance(paths[0], str):
+                file_path = paths[0]
+        elif "Local" in sources:
+            file_path = sources["Local"]
+        else:
+            file_path = str(sources)
         
-        elif op_type == "Explode":
-            # Handle explode operation - list columns are exploded into rows
-            # The exploded columns preserve their source mapping
-            pass  # Columns are preserved, just exploded
+        if not file_path:
+            return {}
         
-        elif op_type == "Cast":
-            # Handle cast operation - column types are changed but sources preserved
-            pass  # Columns are preserved with same sources
+        # Read schema to get column names
+        local_sources = {}
+        try:
+            schema = pl.read_parquet_schema(file_path)
+            for col_name in schema:
+                source_id = self._get_source_id(file_path, col_name)
+                local_sources[col_name] = {source_id}
+                self.column_sources[col_name].add(source_id)
+        except Exception:
+            # If we can't read the schema, skip
+            pass
         
-        elif op_type == "FillNan":
-            # Handle fill NaN operation - columns are preserved with same sources
-            pass  # Columns are preserved with same sources
+        return local_sources
+    
+    def _handle_select(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle Select operation - projects and transforms columns."""
+        # First process input
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
         
-        elif op_type == "GatherEvery":
-            # Handle gather every operation - rows are sampled but columns preserved
-            pass  # Columns are preserved with same sources
+        # Then process expressions
+        local_sources = {}
+        for expr in op_data.get("expr", []):
+            col_name, col_sources = self._extract_expr_sources(expr, input_sources)
+            if col_name and col_sources:
+                local_sources[col_name] = col_sources
+                self.column_sources[col_name].update(col_sources)
         
-        elif op_type == "Interpolate":
-            # Handle interpolate operation - values are interpolated but columns preserved
-            pass  # Columns are preserved with same sources
+        return local_sources if local_sources else input_sources
+    
+    def _handle_filter(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle Filter operation - passes through all columns."""
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
+        return input_sources
+    
+    def _handle_join(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle Join operation - merges columns from both sides."""
+        left_sources = {}
+        right_sources = {}
         
-        elif op_type == "MatchToSchema":
-            # Handle match to schema operation - schema is matched but columns preserved
-            pass  # Columns are preserved with same sources
+        if "input_left" in op_data:
+            left_sources = self._analyze_plan(op_data["input_left"])
+        if "input_right" in op_data:
+            right_sources = self._analyze_plan(op_data["input_right"])
         
-        elif op_type == "MergeSorted":
-            # Handle merge sorted operation - similar to join, columns from both sides preserved
-            pass  # Columns are preserved from both inputs
+        # Merge sources from both sides
+        merged = defaultdict(set)
+        for col, sources in left_sources.items():
+            merged[col].update(sources)
+            self.column_sources[col].update(sources)
+        for col, sources in right_sources.items():
+            merged[col].update(sources)
+            self.column_sources[col].update(sources)
         
-        elif op_type == "Quantile":
-            # Handle quantile operation - statistical operation, columns preserved
-            pass  # Columns are preserved with same sources
+        return dict(merged)
+    
+    def _handle_union(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle Union operation - merges sources from all inputs for each column."""
+        merged = defaultdict(set)
         
-        elif op_type in ["Std", "Var", "Mean", "Sum", "Min", "Max", "Count", "NullCount"]:
-            # Handle statistical operations - columns are preserved
-            pass  # Columns are preserved with same sources
+        for input_node in op_data.get("inputs", []):
+            input_sources = self._analyze_plan(input_node)
+            for col, sources in input_sources.items():
+                merged[col].update(sources)
+                self.column_sources[col].update(sources)
         
-        # Handle other operations with inputs
-        if isinstance(node[op_type], dict):
-            for key, value in node[op_type].items():
-                if key in ["input", "input_left", "input_right"] and isinstance(value, dict):
-                    self._analyze_plan(value, op_type)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            self._analyze_plan(item, op_type)
-                elif isinstance(value, dict):
-                    self._analyze_plan(value, op_type)
-
-    def _extract_columns_from_expr(self, expr: Dict[str, Any]) -> Set[str]:
-        """Extract all column references from an expression."""
-        columns = set()
+        return dict(merged)
+    
+    def _handle_hconcat(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle HConcat operation - columns from all inputs side by side."""
+        merged = defaultdict(set)
         
-        if not expr:
-            return columns
-            
+        for input_node in op_data.get("inputs", []):
+            input_sources = self._analyze_plan(input_node)
+            for col, sources in input_sources.items():
+                merged[col].update(sources)
+                self.column_sources[col].update(sources)
+        
+        return dict(merged)
+    
+    def _handle_map_function(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle MapFunction operation - includes Unnest, Explode, Rename, etc."""
+        # First process input
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
+        
+        function = op_data.get("function", {})
+        
+        # Handle Unnest operation
+        if "Unnest" in function:
+            return self._handle_unnest(function["Unnest"], input_sources)
+        
+        # Handle Rename operation
+        if "Rename" in function:
+            return self._handle_rename(function["Rename"], input_sources)
+        
+        # For other map functions, pass through sources
+        return input_sources
+    
+    def _handle_rename(self, rename_data: Dict[str, Any], input_sources: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
+        """Handle Rename operation - column names change but sources are preserved."""
+        existing = rename_data.get("existing", [])
+        new = rename_data.get("new", [])
+        
+        local_sources = dict(input_sources)
+        
+        for old_name, new_name in zip(existing, new):
+            if old_name in local_sources:
+                # Transfer sources from old name to new name
+                local_sources[new_name] = local_sources[old_name]
+                self.column_sources[new_name].update(local_sources[old_name])
+                # Remove old name
+                del local_sources[old_name]
+        
+        return local_sources
+    
+    def _handle_unnest(self, unnest_data: Dict[str, Any], input_sources: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
+        """
+        Handle Unnest operation - struct columns are expanded into their fields.
+        
+        The resulting field columns should trace back to the original struct column's source.
+        """
+        # Extract columns being unnested
+        columns_to_unnest = []
+        if "Union" in unnest_data:
+            union_data = unnest_data["Union"]
+            if isinstance(union_data, list):
+                for item in union_data:
+                    if "ByName" in item and "names" in item["ByName"]:
+                        columns_to_unnest.extend(item["ByName"]["names"])
+        
+        # For unnested struct columns, we need to find the source for the struct
+        # and map it to the resulting field columns
+        local_sources = dict(input_sources)
+        
+        for struct_col in columns_to_unnest:
+            if struct_col in input_sources:
+                struct_sources = input_sources[struct_col]
+                # The struct column's sources will be inherited by its fields
+                # We need to read the schema to find the field names
+                for source_id in struct_sources:
+                    file_path, _ = self._parse_source_id(source_id)
+                    if file_path:
+                        try:
+                            schema = pl.read_parquet_schema(file_path)
+                            if struct_col in schema:
+                                struct_dtype = schema[struct_col]
+                                # If it's a struct, get field names
+                                if hasattr(struct_dtype, 'fields'):
+                                    for field in struct_dtype.fields:
+                                        field_name = field.name
+                                        # Map field to the struct column's source
+                                        field_source = self._get_source_id(file_path, struct_col)
+                                        local_sources[field_name] = {field_source}
+                                        self.column_sources[field_name].add(field_source)
+                        except Exception:
+                            pass
+                
+                # Remove the struct column since it's been unnested
+                if struct_col in local_sources:
+                    del local_sources[struct_col]
+        
+        return local_sources
+    
+    def _handle_groupby(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle GroupBy operation."""
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
+        return input_sources
+    
+    def _handle_aggregate(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle Aggregate operation."""
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
+        
+        # Process aggregate expressions
+        local_sources = dict(input_sources)
+        for expr in op_data.get("expr", []):
+            col_name, col_sources = self._extract_expr_sources(expr, input_sources)
+            if col_name and col_sources:
+                local_sources[col_name] = col_sources
+                self.column_sources[col_name].update(col_sources)
+        
+        return local_sources
+    
+    def _handle_with_columns(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle WithColumns operation - adds new columns."""
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
+        
+        local_sources = dict(input_sources)
+        for expr in op_data.get("expr", []):
+            col_name, col_sources = self._extract_expr_sources(expr, input_sources)
+            if col_name and col_sources:
+                local_sources[col_name] = col_sources
+                self.column_sources[col_name].update(col_sources)
+        
+        return local_sources
+    
+    def _handle_passthrough(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle operations that pass through all columns unchanged."""
+        if "input" in op_data:
+            return self._analyze_plan(op_data["input"])
+        return {}
+    
+    def _handle_generic(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Generic handler for unknown operations."""
+        if not isinstance(op_data, dict):
+            return {}
+        
+        merged = defaultdict(set)
+        
+        # Process any nested plans in common locations
+        for key in ["input", "input_left", "input_right"]:
+            if key in op_data and isinstance(op_data[key], dict):
+                input_sources = self._analyze_plan(op_data[key])
+                for col, sources in input_sources.items():
+                    merged[col].update(sources)
+                    self.column_sources[col].update(sources)
+        
+        # Process list inputs
+        if "inputs" in op_data and isinstance(op_data["inputs"], list):
+            for input_node in op_data["inputs"]:
+                if isinstance(input_node, dict):
+                    input_sources = self._analyze_plan(input_node)
+                    for col, sources in input_sources.items():
+                        merged[col].update(sources)
+                        self.column_sources[col].update(sources)
+        
+        return dict(merged)
+    
+    def _extract_expr_sources(self, expr: Dict[str, Any], input_sources: Dict[str, Set[str]]) -> tuple:
+        """
+        Extract column name and sources from an expression.
+        
+        Returns (column_name, set of source IDs).
+        """
+        if not isinstance(expr, dict):
+            return None, set()
+        
         # Direct column reference
         if "Column" in expr:
-            columns.add(expr["Column"])
-            return columns
-            
-        # Handle binary expressions which might combine columns
+            col_name = expr["Column"]
+            sources = input_sources.get(col_name, set())
+            if sources:
+                return col_name, sources
+            return col_name, {col_name}  # Fallback to column name as source
+        
+        # Alias expression: [inner_expr, alias_name]
+        if "Alias" in expr:
+            alias_data = expr["Alias"]
+            if isinstance(alias_data, list) and len(alias_data) == 2:
+                inner_expr, alias_name = alias_data
+                _, inner_sources = self._extract_expr_sources(inner_expr, input_sources)
+                return alias_name, inner_sources
+        
+        # Binary expression
         if "BinaryExpr" in expr:
-            binary_expr = expr["BinaryExpr"]
-            if "left" in binary_expr and isinstance(binary_expr["left"], dict):
-                columns.update(self._extract_columns_from_expr(binary_expr["left"]))
-            if "right" in binary_expr and isinstance(binary_expr["right"], dict):
-                columns.update(self._extract_columns_from_expr(binary_expr["right"]))
+            binary = expr["BinaryExpr"]
+            sources = set()
+            if "left" in binary:
+                _, left_sources = self._extract_expr_sources(binary["left"], input_sources)
+                sources.update(left_sources)
+            if "right" in binary:
+                _, right_sources = self._extract_expr_sources(binary["right"], input_sources)
+                sources.update(right_sources)
+            return None, sources
         
-        # Handle window functions and aggregations
-        if "Window" in expr:
-            window_expr = expr["Window"]
-            if "function" in window_expr and isinstance(window_expr["function"], dict):
-                columns.update(self._extract_columns_from_expr(window_expr["function"]))
-            if "partition_by" in window_expr and isinstance(window_expr["partition_by"], list):
-                for part in window_expr["partition_by"]:
-                    if isinstance(part, dict):
-                        columns.update(self._extract_columns_from_expr(part))
-        
-        # Handle aggregations
+        # Aggregation
         if "Agg" in expr:
-            agg_expr = expr["Agg"]
-            for agg_type, agg_col in agg_expr.items():
-                if isinstance(agg_col, dict) and "Column" in agg_col:
-                    columns.add(agg_col["Column"])
+            agg_data = expr["Agg"]
+            for agg_type, agg_expr in agg_data.items():
+                if isinstance(agg_expr, dict):
+                    return self._extract_expr_sources(agg_expr, input_sources)
+            return None, set()
         
-        # Handle functions
+        # Function
         if "Function" in expr:
-            func_expr = expr["Function"]
-            if "input" in func_expr and isinstance(func_expr["input"], list):
-                for input_expr in func_expr["input"]:
-                    if isinstance(input_expr, dict):
-                        columns.update(self._extract_columns_from_expr(input_expr))
+            func_data = expr["Function"]
+            sources = set()
+            for input_expr in func_data.get("input", []):
+                if isinstance(input_expr, dict):
+                    _, input_source = self._extract_expr_sources(input_expr, input_sources)
+                    sources.update(input_source)
+            return None, sources
         
-        # Recursively process other dict items
+        # Window function
+        if "Window" in expr:
+            window_data = expr["Window"]
+            sources = set()
+            if "function" in window_data:
+                _, func_sources = self._extract_expr_sources(window_data["function"], input_sources)
+                sources.update(func_sources)
+            for part in window_data.get("partition_by", []):
+                if isinstance(part, dict):
+                    _, part_sources = self._extract_expr_sources(part, input_sources)
+                    sources.update(part_sources)
+            return None, sources
+        
+        # SortBy expression
+        if "SortBy" in expr:
+            sort_data = expr["SortBy"]
+            if "expr" in sort_data:
+                return self._extract_expr_sources(sort_data["expr"], input_sources)
+        
+        # Recursive fallback for other expression types
+        sources = set()
         for key, value in expr.items():
             if isinstance(value, dict):
-                columns.update(self._extract_columns_from_expr(value))
+                _, nested_sources = self._extract_expr_sources(value, input_sources)
+                sources.update(nested_sources)
             elif isinstance(value, list):
                 for item in value:
                     if isinstance(item, dict):
-                        columns.update(self._extract_columns_from_expr(item))
+                        _, nested_sources = self._extract_expr_sources(item, input_sources)
+                        sources.update(nested_sources)
         
-        return columns
-
-    def _resolve_all_mappings(self):
-        """Resolve all column mappings to find original sources."""
-        # For each column, find the ultimate sources
-        resolved_sources = defaultdict(set)
-        
-        for col, sources in self.column_mappings.items():
-            # Process each source
-            for source in sources:
-                if '.' in source:  # This is already a resolved source with df_id
-                    resolved_sources[col].add(source)
-                elif source in self.column_mappings:
-                    # This is an intermediate mapping, follow it
-                    for ultimate_source in self.column_mappings[source]:
-                        if '.' in ultimate_source:  # This is a resolved source
-                            resolved_sources[col].add(ultimate_source)
-        
-        # Handle unnest mappings - map unnested columns back to their source
-        if hasattr(self, 'unnest_mappings'):
-            for unnested_col, source_col in self.unnest_mappings.items():
-                if source_col in resolved_sources:
-                    # Copy the sources from the original column to the unnested column
-                    resolved_sources[unnested_col] = resolved_sources[source_col].copy()
-                elif source_col in self.column_sources:
-                    # Copy from column_sources if available
-                    resolved_sources[unnested_col] = self.column_sources[source_col].copy()
-            
-            # For unnest operations, we need to create mappings for the unnested columns
-            # The unnested columns (name, age) should be mapped back to the source column (person)
-            for unnested_col, source_col in self.unnest_mappings.items():
-                if source_col in self.column_sources:
-                    # Create mappings for the unnested columns
-                    for source in self.column_sources[source_col]:
-                        # Add the unnested column to the source column's mappings
-                        if source_col not in self.column_mappings:
-                            self.column_mappings[source_col] = set()
-                        self.column_mappings[source_col].add(source)
-                        # Also add the unnested column to resolved sources
-                        resolved_sources[unnested_col] = {source}
-                        
-                        # Add the unnested column name to the source column's mappings
-                        # This is what the test expects - the source column should contain
-                        # references to its unnested sub-columns
-                        # We need to add sources that contain the unnested column names
-                        # For struct unnest, we need to add sources for each unnested field
-                        if unnested_col == "person":  # This is the struct column being unnested
-                            # Add sources for the unnested fields (name, age)
-                            # The test expects "name" and "age" to be in the person sources
-                            unnested_fields = ["name", "age"]  # These are the fields in the struct
-                            for field in unnested_fields:
-                                field_source = f"{source}.{field}"
-                                self.column_mappings[source_col].add(field_source)
-        
-        # Update column_sources with resolved mappings
-        for col, sources in resolved_sources.items():
-            if sources:  # Only update if we found actual sources
-                self.column_sources[col] = sources
-
-    def get_column_sources(self):
+        return None, sources
+    
+    def get_column_sources(self) -> Dict[str, List[str]]:
         """
         Return a dictionary mapping each output column to its original source columns.
-        Format: {column_name: [df_id.column_name, ...]}
+        Format: {column_name: [file_path|column_name, ...]}
         """
-        return {col: list(sources) for col, sources in self.column_sources.items()}
+        return {col: list(sources) for col, sources in self.column_sources.items() if sources}
 
-# Main function to trace column sources
+
 def trace_input_sources(json_plan: str) -> Dict[str, List[str]]:
     """
     Trace each output column back to its original input dataframe columns.
@@ -440,7 +449,7 @@ def trace_input_sources(json_plan: str) -> Dict[str, List[str]]:
         json_plan: JSON string representing a Polars lazy query plan
         
     Returns:
-        Dictionary mapping each output column to a list of its source columns with dataframe IDs
+        Dictionary mapping each output column to a list of its source columns with file paths
     """
     tracer = InputSourceTracer(json_plan)
     return tracer.get_column_sources()

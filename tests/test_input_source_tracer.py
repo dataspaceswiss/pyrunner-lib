@@ -17,9 +17,6 @@ class TestInputSourceTracer:
         """Create a minimal tracer for testing without file operations."""
         tracer = InputSourceTracer.__new__(InputSourceTracer)
         tracer.column_sources = {}
-        tracer.column_mappings = {}
-        tracer.dataframe_scans = {}
-        tracer.df_counter = 0
         return tracer
     
     def _create_test_parquet_file(self, data: dict, filename: str = "test.parquet") -> str:
@@ -146,11 +143,11 @@ class TestInputSourceTracer:
             
             tracer = InputSourceTracer(plan_json)
             
-            # Check that new column is mapped to old column's sources
-            assert "new_col" in tracer.column_mappings or "new_col" in tracer.column_sources
-            # The mapping should contain the resolved source path
-            if "new_col" in tracer.column_mappings:
-                assert any("old_col" in source for source in tracer.column_mappings["new_col"])
+            # Check that new column is tracked
+            assert "new_col" in tracer.column_sources
+            # The source should contain the original column name
+            sources = tracer.column_sources["new_col"]
+            assert any("old_col" in source for source in sources)
         finally:
             os.unlink(parquet_file)
     
@@ -168,11 +165,11 @@ class TestInputSourceTracer:
             
             tracer = InputSourceTracer(plan_json)
             
-            # Check that alias is mapped to source column
-            assert "alias_col" in tracer.column_mappings or "alias_col" in tracer.column_sources
-            # The mapping should contain the resolved source path
-            if "alias_col" in tracer.column_mappings:
-                assert any("source_col" in source for source in tracer.column_mappings["alias_col"])
+            # Check that alias is tracked with source column
+            assert "alias_col" in tracer.column_sources
+            # The source should reference the original column
+            sources = tracer.column_sources["alias_col"]
+            assert any("source_col" in source for source in sources)
         finally:
             os.unlink(parquet_file)
     
@@ -192,8 +189,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # Select should preserve columns
-            assert "col1" in tracer.column_sources or "col1" in tracer.column_mappings
-            assert "col2" in tracer.column_sources or "col2" in tracer.column_mappings
+            assert "col1" in tracer.column_sources
+            assert "col2" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -212,8 +209,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # Filter should preserve all columns
-            assert "col1" in tracer.column_sources or "col1" in tracer.column_mappings
-            assert "col2" in tracer.column_sources or "col2" in tracer.column_mappings
+            assert "col1" in tracer.column_sources
+            assert "col2" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -238,9 +235,9 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # Join should preserve columns from both sides
-            assert "id" in tracer.column_sources or "id" in tracer.column_mappings
-            assert "left_col" in tracer.column_sources or "left_col" in tracer.column_mappings
-            assert "right_col" in tracer.column_sources or "right_col" in tracer.column_mappings
+            assert "id" in tracer.column_sources
+            assert "left_col" in tracer.column_sources
+            assert "right_col" in tracer.column_sources
         finally:
             os.unlink(parquet_file1)
             os.unlink(parquet_file2)
@@ -260,8 +257,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # GroupBy should preserve grouping columns and aggregated columns
-            assert "group_col" in tracer.column_sources or "group_col" in tracer.column_mappings
-            assert "value_col" in tracer.column_sources or "value_col" in tracer.column_mappings
+            assert "group_col" in tracer.column_sources
+            assert "value_col" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -283,8 +280,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # Aggregate should preserve source columns
-            assert "value_col" in tracer.column_sources or "value_col" in tracer.column_mappings
-            assert "group_col" in tracer.column_sources or "group_col" in tracer.column_mappings
+            assert "value_col" in tracer.column_sources
+            assert "group_col" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -303,8 +300,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # Sort should preserve all columns
-            assert "sort_col" in tracer.column_sources or "sort_col" in tracer.column_mappings
-            assert "other_col" in tracer.column_sources or "other_col" in tracer.column_mappings
+            assert "sort_col" in tracer.column_sources
+            assert "other_col" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -325,10 +322,8 @@ class TestInputSourceTracer:
             
             # Drop operation is implemented as Select with Difference selector
             # All columns are still in the source, but only col2 and col3 are selected
-            assert "col2" in tracer.column_sources or "col2" in tracer.column_mappings
-            assert "col3" in tracer.column_sources or "col3" in tracer.column_mappings
-            # col1 is still in the source data but not selected in the final output
-            assert "col1" in tracer.column_sources or "col1" in tracer.column_mappings
+            assert "col2" in tracer.column_sources
+            assert "col3" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -350,8 +345,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # WithColumns should preserve source columns and add new ones
-            assert "source_col" in tracer.column_sources or "source_col" in tracer.column_mappings
-            assert "other_col" in tracer.column_sources or "other_col" in tracer.column_mappings
+            assert "source_col" in tracer.column_sources
+            assert "other_col" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -370,8 +365,8 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # Unnest should preserve all columns including the unnested one
-            assert "id" in tracer.column_sources or "id" in tracer.column_mappings
-            assert "values" in tracer.column_sources or "values" in tracer.column_mappings
+            assert "id" in tracer.column_sources
+            assert "values" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
@@ -397,14 +392,17 @@ class TestInputSourceTracer:
             plan_json = lf.serialize(format="json")
             
             tracer = InputSourceTracer(plan_json)
+            sources = tracer.get_column_sources()
             
-            # Unnest should preserve all columns
-            # The unnested struct columns (name, age) should be tracked back to person
-            assert "id" in tracer.column_sources or "id" in tracer.column_mappings
-            assert any("name" in source for source in tracer.column_mappings["person"])
-            assert any("age" in source for source in tracer.column_mappings["person"])
-            # At least some columns should be tracked
-            assert len(tracer.column_sources) > 0 or len(tracer.column_mappings) > 0
+            # Unnest should track id and the unnested struct fields (name, age)
+            # The struct's fields should trace back to the source file
+            assert "id" in sources, "id column not tracked"
+            assert "name" in sources, "unnested name column not tracked"
+            assert "age" in sources, "unnested age column not tracked"
+            
+            # Verify the sources reference the parquet file
+            all_sources = str(sources)
+            assert parquet_file in all_sources, "Source file not in column sources"
         finally:
             if parquet_file:
                 os.unlink(parquet_file)
@@ -425,69 +423,39 @@ class TestInputSourceTracer:
             tracer = InputSourceTracer(plan_json)
             
             # All columns should be preserved
-            assert "id" in tracer.column_sources or "id" in tracer.column_mappings
-            assert "list1" in tracer.column_sources or "list1" in tracer.column_mappings
-            assert "list2" in tracer.column_sources or "list2" in tracer.column_mappings
+            assert "id" in tracer.column_sources
+            assert "list1" in tracer.column_sources
+            assert "list2" in tracer.column_sources
         finally:
             os.unlink(parquet_file)
     
-    def test_extract_columns_from_expr(self):
-        """Test _extract_columns_from_expr method."""
-        tracer = self._create_minimal_tracer()
+    def test_expression_sources(self):
+        """Test that expressions track source columns correctly."""
+        parquet_file = self._create_test_parquet_file({
+            "col1": [1, 2, 3],
+            "col2": [4, 5, 6],
+            "col3": [7, 8, 9]
+        })
         
-        # Test direct column reference
-        expr = {"Column": "test_col"}
-        columns = tracer._extract_columns_from_expr(expr)
-        assert "test_col" in columns
-        
-        # Test binary expression
-        expr = {
-            "BinaryExpr": {
-                "left": {"Column": "col1"},
-                "right": {"Column": "col2"}
-            }
-        }
-        columns = tracer._extract_columns_from_expr(expr)
-        assert "col1" in columns
-        assert "col2" in columns
-        
-        # Test aggregation
-        expr = {
-            "Agg": {
-                "Sum": {"Column": "value_col"}
-            }
-        }
-        columns = tracer._extract_columns_from_expr(expr)
-        assert "value_col" in columns
-        
-        # Test function
-        expr = {
-            "Function": {
-                "input": [
-                    {"Column": "func_col"}
-                ]
-            }
-        }
-        columns = tracer._extract_columns_from_expr(expr)
-        assert "func_col" in columns
-    
-    def test_resolve_all_mappings(self):
-        """Test _resolve_all_mappings method."""
-        # Create a tracer with some mappings
-        tracer = self._create_minimal_tracer()
-        
-        # Add some test mappings with resolved sources (containing dots)
-        tracer.column_mappings = {
-            "col1": {"source1.file|col1"},  # Already resolved
-            "col2": {"col1"},  # Intermediate mapping
-            "col3": {"source2.file|col3"}  # Already resolved
-        }
-        
-        tracer._resolve_all_mappings()
-        
-        # Check that mappings are resolved
-        assert "col1" in tracer.column_sources
-        assert "col3" in tracer.column_sources
+        try:
+            # Create a query with various expression types
+            lf = pl.scan_parquet(parquet_file).select([
+                pl.col("col1"),  # Direct column
+                pl.col("col2").alias("renamed"),  # Alias
+                (pl.col("col1") + pl.col("col3")).alias("sum_cols"),  # Binary expression
+            ])
+            plan_json = lf.serialize(format="json")
+            
+            tracer = InputSourceTracer(plan_json)
+            sources = tracer.get_column_sources()
+            
+            # col1 should be tracked
+            assert "col1" in sources
+            # renamed should trace back to col2
+            assert "renamed" in sources
+            assert any("col2" in s for s in sources["renamed"])
+        finally:
+            os.unlink(parquet_file)
     
     def test_get_column_sources(self):
         """Test get_column_sources method."""
@@ -606,9 +574,9 @@ class TestTraceInputSources:
             tracer = InputSourceTracer(plan_json)
             
             # Union should preserve columns from both sides
-            assert "id" in tracer.column_sources or "id" in tracer.column_mappings
-            assert "name" in tracer.column_sources or "name" in tracer.column_mappings
-            assert "age" in tracer.column_sources or "age" in tracer.column_mappings
+            assert "id" in tracer.column_sources
+            assert "name" in tracer.column_sources
+            assert "age" in tracer.column_sources
             
             # Check that sources from BOTH files are tracked for EACH column
             sources = tracer.get_column_sources()
@@ -679,5 +647,76 @@ class TestTraceInputSources:
                     # Just ensure they don't crash the tracer
                     pass
                     
+        finally:
+            os.unlink(parquet_file)
+    
+    def test_incremental_join_with_delta(self):
+        """Test incremental build pattern - joining main data with delta data and itself."""
+        # Create main and delta parquet files
+        parquet_main = self._create_test_parquet_file({
+            "id": [1, 2, 3],
+            "value": [10, 20, 30]
+        })
+        parquet_delta = self._create_test_parquet_file({
+            "id": [4, 5],
+            "value": [40, 50]
+        })
+        
+        try:
+            # Simulate incremental pattern: union main+delta, then join with main
+            main_lf = pl.scan_parquet(parquet_main)
+            delta_lf = pl.scan_parquet(parquet_delta)
+            
+            # Union main and delta
+            union_lf = pl.concat([main_lf, delta_lf])
+            # Join with main (self-join pattern for lookups)
+            result = union_lf.join(
+                main_lf.rename({"value": "old_value"}),
+                on="id",
+                how="left"
+            )
+            
+            plan_json = result.serialize(format="json")
+            sources = trace_input_sources(plan_json)
+            
+            # Verify we have column sources
+            assert "id" in sources, "id column not in sources"
+            assert "value" in sources, "value column not in sources"
+            
+            # Convert all sources to a string for checking
+            all_sources_str = str(sources)
+            
+            # Both files should be tracked
+            assert parquet_main in all_sources_str, "Main file not found in sources"
+            assert parquet_delta in all_sources_str, "Delta file not found in sources"
+            
+        finally:
+            os.unlink(parquet_main)
+            os.unlink(parquet_delta)
+    
+    def test_self_join(self):
+        """Test self-join - joining a dataset with itself."""
+        parquet_file = self._create_test_parquet_file({
+            "id": [1, 2, 3],
+            "value": [10, 20, 30]
+        })
+        
+        try:
+            lf1 = pl.scan_parquet(parquet_file)
+            lf2 = pl.scan_parquet(parquet_file).rename({"value": "value2"})
+            
+            result = lf1.join(lf2, on="id")
+            plan_json = result.serialize(format="json")
+            
+            sources = trace_input_sources(plan_json)
+            
+            # Both value columns should trace back to the same file
+            assert "value" in sources, "value column not tracked"
+            assert "value2" in sources, "value2 column not tracked"
+            
+            # Both should reference the same file
+            assert any(parquet_file in s for s in sources["value"])
+            assert any(parquet_file in s for s in sources["value2"])
+            
         finally:
             os.unlink(parquet_file)

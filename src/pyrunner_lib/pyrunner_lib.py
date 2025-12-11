@@ -280,8 +280,21 @@ def transform(transform_id: str, base_path: str = "") -> None:
 
         # Execute transformation
         start_time = time.time()
-        result = transform_func.transform(**data_dict)
+        transform_result = transform_func.transform(**data_dict)
         transform_time = time.time() - start_time
+
+        # Handle optional health_checks return
+        if isinstance(transform_result, tuple) and len(transform_result) == 2:
+            result, health_checks = transform_result
+        else:
+            result = transform_result
+            health_checks = None
+
+        # Execute health check if provided
+        if health_checks and isinstance(result, (pl.LazyFrame, pl.DataFrame)):
+            start_time = time.time()
+            run_health_checks(result, health_checks)
+            health_check_time = time.time() - start_time
 
         # Write output
         start_time = time.time()
@@ -292,6 +305,8 @@ def transform(transform_id: str, base_path: str = "") -> None:
         print("--------- Build successful ---------")
         print(f"Read Time:      {read_time:.2f} sec")
         print(f"Transform Time: {transform_time:.2f} sec")
+        if health_checks:
+            print(f"Health Check Time: {health_check_time:.2f} sec")
         print(f"Write Time:     {write_time:.2f} sec")
         
     except PyrunnerError:
