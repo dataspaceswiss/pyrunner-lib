@@ -292,6 +292,7 @@ def transform(transform_id: str, base_path: str = "") -> None:
             health_checks = None
 
         # Execute health check if provided
+        health_check_time = None
         if health_checks and isinstance(result, (pl.LazyFrame, pl.DataFrame)):
             start_time = time.time()
             run_health_checks(result, health_checks)
@@ -306,7 +307,7 @@ def transform(transform_id: str, base_path: str = "") -> None:
         print("--------- Build successful ---------")
         print(f"Read Time:      {read_time:.2f} sec")
         print(f"Transform Time: {transform_time:.2f} sec")
-        if health_check_time:
+        if health_check_time is not None:
             print(f"Health Check Time: {health_check_time:.2f} sec")
         print(f"Write Time:     {write_time:.2f} sec")
         

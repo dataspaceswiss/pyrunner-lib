@@ -7,8 +7,13 @@ not the entire dataframe.
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 import polars as pl
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 
 class HealthCheckFailure(Exception):
@@ -18,10 +23,22 @@ class HealthCheckFailure(Exception):
 
 def run_health_checks(lf, column_builders):
     """
-    Run health checks on a LazyFrame without collecting the entire dataframe.
+    Run health checks on a LazyFrame/DataFrame without collecting the entire dataframe.
+    
+    If input is pandas DataFrame, converts to polars LazyFrame.
+    If input is polars DataFrame, converts to polars LazyFrame.
     
     Each check only collects the specific aggregate statistics it needs.
     """
+    # Handle different input types
+    if hasattr(os, "environ") and "pandas" in sys.modules:
+        import pandas as pd
+        if isinstance(lf, pd.DataFrame):
+            lf = pl.from_pandas(lf).lazy()
+    
+    if isinstance(lf, pl.DataFrame):
+        lf = lf.lazy()
+
     column_checks = dict(cb.build() for cb in column_builders)
 
     report_by_col = {}
