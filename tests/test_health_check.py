@@ -510,3 +510,34 @@ class TestRunHealthChecks:
                 assert "severity" in check
                 assert "passed" in check
                 assert "error" in check
+
+
+class TestPandasDataFrame:
+    """Test run_health_checks with Pandas DataFrames."""
+    def test_run_health_checks_pandas(self):
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+            builders = [
+                Check("a").numeric_check(gt=0),
+                Check("b").non_empty_strings()
+            ]
+            report = run_health_checks(df, builders)
+            assert report["summary"]["passed"] == 2
+            assert report["summary"]["failed"] == 0
+
+
+class TestPolarsDataFrame:
+    """Test run_health_checks with Polars eager DataFrames."""
+    def test_run_health_checks_polars_eager(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+            builders = [
+                Check("a").numeric_check(gt=0),
+                Check("b").non_empty_strings()
+            ]
+            report = run_health_checks(df, builders)
+            assert report["summary"]["passed"] == 2
+            assert report["summary"]["failed"] == 0

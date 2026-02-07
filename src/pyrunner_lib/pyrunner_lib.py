@@ -3,7 +3,8 @@ import os
 import time
 import json
 import sys
-from typing import Dict, Any, Union, List, Optional
+import inspect
+from typing import Dict, Any, Union, List, Optional, Callable
 from pathlib import Path
 from pydantic import BaseModel, ValidationError
 import polars as pl
@@ -13,6 +14,15 @@ import pyarrow as pa
 from .input_source_tracer import trace_input_sources
 from .health_check import run_health_checks
 import warnings
+
+
+class Transform:
+    """Class to represent a transformation input with an RID."""
+    def __init__(self, rid: str):
+        self.rid = rid
+
+    def __repr__(self):
+        return f"Transform('{self.rid}')"
 
 
 # Custom exceptions
@@ -188,14 +198,174 @@ def load_module(module_name: str, file_path: str) -> Any:
         raise ModuleLoadError(f"Failed to load module from {file_path}: {e}") from e
 
 
-def read_parquet_files(connections: Dict[str, Connection], params: List[str], base_path: str, transform_id: str = None) -> Dict[str, Union[pl.LazyFrame, pd.DataFrame]]:
-    """Reads input Parquet files based on the provided connections."""
+from functools import wraps
+
+def transform(*args, **kwargs):
+    """
+    Acts as both a decorator and the main runner function for transformations.
+    
+    Decorator usage:
+        @transform
+        def my_func(input): ...
+        
+        @transform(input=Transform("rid-xxx"))
+        def my_func(input): ...
+        
+    Runner usage:
+        transform("transform_id", base_path="")
+    """
+    if len(args) == 1 and callable(args[0]):
+        # Case: @transform
+        func = args[0]
+        func._is_pyrunner_transform = True
+        return func
+    elif len(args) == 0 and kwargs:
+        # Case: @transform(input=Transform("..."))
+        def wrapper(func):
+            func._is_pyrunner_transform = True
+            func._pyrunner_metadata = kwargs
+            return func
+        return wrapper
+    else:
+        # Case: transform("id", "path") - Runner mode
+        return _execute_transform(*args, **kwargs)
+
+# Mark as the runner function to avoid picking it up during discovery
+transform._is_pyrunner_runner = True
+
+
+def _execute_transform(transform_id: str, base_path: str = "") -> None:
+    """Internal function to execute the transformation process."""
+    try:
+        # Load configuration and DS_META data
+        load_configuration()
+        load_ds_meta()
+        
+        if CONNECTIONS is None:
+            raise ConfigurationError("Connections not loaded")
+        
+        connections = {path_to_name(conn.path): conn for conn in CONNECTIONS}
+        transform_conn = next((c for c in CONNECTIONS if c.id == transform_id), None)
+
+        if not transform_conn:
+            raise TransformNotFoundError(f"Transform with ID '{transform_id}' not found.")
+
+        module_name = path_to_name(transform_conn.path)
+        module = load_module(module_name, transform_conn.path)
+
+        # Find the transform function
+        # 1. Look for a function named 'transform' (that isn't our own runner)
+        # 2. Look for functions decorated with @transform
+        main_func = None
+        
+        if hasattr(module, 'transform') and callable(module.transform) and not getattr(module.transform, '_is_pyrunner_runner', False):
+            main_func = module.transform
+        else:
+            # Prefer decorated functions
+            decorated_funcs = [
+                obj for name, obj in inspect.getmembers(module)
+                if callable(obj) and getattr(obj, '_is_pyrunner_transform', False) is True
+            ]
+            if decorated_funcs:
+                # If multiple, pick the first one found.
+                main_func = decorated_funcs[0]
+
+        if not main_func:
+            raise ModuleLoadError(f"Module {transform_conn.path} does not contain a 'transform' function or @transform decorated function.")
+
+        # Inspect function signature
+        sig = inspect.signature(main_func)
+        params = sig.parameters
+        
+        # Determine mapping for each parameter
+        metadata = getattr(main_func, '_pyrunner_metadata', {})
+        param_mapping = {} # parameter_name -> RID or legacy_name
+        
+        for name, param in params.items():
+            # Skip *args and **kwargs
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+                
+            # Check decorator metadata first
+            if name in metadata:
+                val = metadata[name]
+                if isinstance(val, Transform):
+                    param_mapping[name] = val.rid
+                else:
+                    param_mapping[name] = val # Assume it's an RID string or legacy name
+            # Check type annotation
+            elif isinstance(param.annotation, Transform):
+                param_mapping[name] = param.annotation.rid
+            else:
+                # Default to parameter name
+                param_mapping[name] = name
+
+        # Read input data
+        start_time = time.time()
+        data_dict = read_parquet_files(connections, param_mapping, base_path, transform_id)
+        read_time = time.time() - start_time
+
+        # Execute transformation
+        start_time = time.time()
+        transform_result = main_func(**data_dict)
+        transform_time = time.time() - start_time
+
+        # Handle optional health_checks return
+        if isinstance(transform_result, tuple) and len(transform_result) == 2:
+            result, health_checks = transform_result
+        else:
+            result = transform_result
+            health_checks = None
+
+        # Execute health check if provided
+        health_check_time = None
+        if health_checks and isinstance(result, (pl.LazyFrame, pl.DataFrame, pd.DataFrame)):
+            start_time = time.time()
+            run_health_checks(result, health_checks)
+            health_check_time = time.time() - start_time
+
+        # Write output
+        start_time = time.time()
+        output_path = f'{base_path}/data/{transform_conn.id}/datasets/data.parquet'
+        write_df_to_parquet(result, output_path, transform_conn.id, base_path)
+        write_time = time.time() - start_time
+
+        print("--------- Build successful ---------")
+        print(f"Read Time:      {read_time:.2f} sec")
+        print(f"Transform Time: {transform_time:.2f} sec")
+        if health_check_time is not None:
+            print(f"Health Check Time: {health_check_time:.2f} sec")
+        print(f"Write Time:     {write_time:.2f} sec")
+        
+    except PyrunnerError:
+        # Re-raise our custom exceptions
+        raise
+    except Exception as e:
+        # Catch any unexpected errors
+        raise PyrunnerError(f"Unexpected error during transformation: {e}") from e
+
+
+def read_parquet_files(connections: Dict[str, Connection], params: Union[List[str], Dict[str, str]], base_path: str, transform_id: str = None) -> Dict[str, Union[pl.LazyFrame, pd.DataFrame]]:
+    """Reads input Parquet files based on parameter mapping (RID or legacy name)."""
     if DF_TYPE is None:
         raise ConfigurationError("Configuration not loaded. Call load_configuration() first.")
     
     data_dict = {}
-    for param in params:
-        conn = connections.get(param)
+    
+    # Convert list of params to identity mapping for backward compatibility
+    if isinstance(params, list):
+        param_mapping = {p: p for p in params}
+    else:
+        param_mapping = params
+
+    # Create internal lookup for connections by ID (RID) and by legacy name (path stem)
+    conn_by_id = {conn.id: conn for conn in connections.values()}
+    conn_by_name = connections # Already keyed by path stem
+    
+    for param_name, mapping_key in param_mapping.items():
+        # Try finding by ID first (RID), then by name
+        conn = conn_by_id.get(mapping_key) or conn_by_name.get(mapping_key)
+        
         if conn:
             file_path = f'{base_path}/data/{conn.id}/datasets/data.parquet'
             try:
@@ -242,78 +412,9 @@ def read_parquet_files(connections: Dict[str, Connection], params: List[str], ba
                     ds_meta_data = DS_META_DATA.get(conn.id) if DS_META_DATA else None
                     df.ds_meta = DSMeta(conn.id, ds_meta_data)
                 
-                data_dict[param] = df
+                data_dict[param_name] = df
             except Exception as e:
-                raise DataLoadError(f"Failed to load {param}. Ensure the input dataset exists at {file_path}: {e}") from e
+                raise DataLoadError(f"Failed to load {param_name}. Ensure the input dataset exists at {file_path}: {e}") from e
         else:
-            raise DataLoadError(f"Input parameter '{param}' not found in dataset connections")
+            raise DataLoadError(f"Input parameter '{param_name}' not found in dataset connections")
     return data_dict
-
-
-def transform(transform_id: str, base_path: str = "") -> None:
-    """Main function to execute the transformation process."""
-    try:
-        # Load configuration and DS_META data
-        load_configuration()
-        load_ds_meta()
-        
-        if CONNECTIONS is None:
-            raise ConfigurationError("Connections not loaded")
-        
-        connections = {path_to_name(conn.path): conn for conn in CONNECTIONS}
-        transform_conn = next((c for c in CONNECTIONS if c.id == transform_id), None)
-
-        if not transform_conn:
-            raise TransformNotFoundError(f"Transform with ID '{transform_id}' not found.")
-
-        module_name = path_to_name(transform_conn.path)
-        transform_func = load_module(module_name, transform_conn.path)
-
-        if not hasattr(transform_func, 'transform'):
-            raise ModuleLoadError(f"Module {transform_conn.path} does not contain a 'transform' function.")
-
-        params = list(transform_func.transform.__code__.co_varnames[:transform_func.transform.__code__.co_argcount])
-
-        # Read input data
-        start_time = time.time()
-        data_dict = read_parquet_files(connections, params, base_path, transform_id)
-        read_time = time.time() - start_time
-
-        # Execute transformation
-        start_time = time.time()
-        transform_result = transform_func.transform(**data_dict)
-        transform_time = time.time() - start_time
-
-        # Handle optional health_checks return
-        if isinstance(transform_result, tuple) and len(transform_result) == 2:
-            result, health_checks = transform_result
-        else:
-            result = transform_result
-            health_checks = None
-
-        # Execute health check if provided
-        health_check_time = None
-        if health_checks and isinstance(result, (pl.LazyFrame, pl.DataFrame)):
-            start_time = time.time()
-            run_health_checks(result, health_checks)
-            health_check_time = time.time() - start_time
-
-        # Write output
-        start_time = time.time()
-        output_path = f'{base_path}/data/{transform_conn.id}/datasets/data.parquet'
-        write_df_to_parquet(result, output_path, transform_conn.id, base_path)
-        write_time = time.time() - start_time
-
-        print("--------- Build successful ---------")
-        print(f"Read Time:      {read_time:.2f} sec")
-        print(f"Transform Time: {transform_time:.2f} sec")
-        if health_check_time is not None:
-            print(f"Health Check Time: {health_check_time:.2f} sec")
-        print(f"Write Time:     {write_time:.2f} sec")
-        
-    except PyrunnerError:
-        # Re-raise our custom exceptions
-        raise
-    except Exception as e:
-        # Catch any unexpected errors
-        raise PyrunnerError(f"Unexpected error during transformation: {e}") from e
