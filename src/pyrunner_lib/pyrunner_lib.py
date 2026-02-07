@@ -280,6 +280,7 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
         # Determine mapping for each parameter
         metadata = getattr(main_func, '_pyrunner_metadata', {})
         param_mapping = {} # parameter_name -> RID or legacy_name
+        explicit_params = set()
         
         for name, param in params.items():
             # Skip *args and **kwargs
@@ -291,18 +292,20 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
                 val = metadata[name]
                 if isinstance(val, Transform):
                     param_mapping[name] = val.rid
+                    explicit_params.add(name)
                 else:
                     param_mapping[name] = val # Assume it's an RID string or legacy name
             # Check type annotation
             elif isinstance(param.annotation, Transform):
                 param_mapping[name] = param.annotation.rid
+                explicit_params.add(name)
             else:
                 # Default to parameter name
                 param_mapping[name] = name
 
         # Read input data
         start_time = time.time()
-        data_dict = read_parquet_files(connections, param_mapping, base_path, transform_id)
+        data_dict = read_parquet_files(connections, param_mapping, base_path, transform_id, explicit_params)
         read_time = time.time() - start_time
 
         # Execute transformation
@@ -345,7 +348,7 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
         raise PyrunnerError(f"Unexpected error during transformation: {e}") from e
 
 
-def read_parquet_files(connections: Dict[str, Connection], params: Union[List[str], Dict[str, str]], base_path: str, transform_id: str = None) -> Dict[str, Union[pl.LazyFrame, pd.DataFrame]]:
+def read_parquet_files(connections: Dict[str, Connection], params: Union[List[str], Dict[str, str]], base_path: str, transform_id: str = None, explicit_params: Optional[set] = None) -> Dict[str, Union[pl.LazyFrame, pd.DataFrame]]:
     """Reads input Parquet files based on parameter mapping (RID or legacy name)."""
     if DF_TYPE is None:
         raise ConfigurationError("Configuration not loaded. Call load_configuration() first.")
@@ -366,55 +369,61 @@ def read_parquet_files(connections: Dict[str, Connection], params: Union[List[st
         # Try finding by ID first (RID), then by name
         conn = conn_by_id.get(mapping_key) or conn_by_name.get(mapping_key)
         
-        if conn:
-            file_path = f'{base_path}/data/{conn.id}/datasets/data.parquet'
-            try:
-                if DF_TYPE == "polars":
-                    df = pl.scan_parquet(file_path)
-                else:
-                    df = pd.read_parquet(file_path, engine='pyarrow')
-                
-                # Inject ds_meta attribute into the dataframe
-                if transform_id is not None:                                                                                       
-                    # Create a custom class for ds_meta with dot notation access
-                    class DSMeta:
-                        def __init__(self, transform_id, ds_meta_data=None):
-                            self.transform_id = transform_id
-                            self.artifact_dir = f"/data/{transform_id}/artifacts"
-                            
-                            # Add DS_META data if available
-                            if ds_meta_data:
-                                self.data_snapshot_id = ds_meta_data.get('Id')
-                                self.build_id = ds_meta_data.get('BuildId')
-                                self.row_count = ds_meta_data.get('RowCount')
-                                self.column_count = ds_meta_data.get('ColumnCount')
-                                self.file_size = ds_meta_data.get('FileSize')
-                                self.schema = ds_meta_data.get('Schema')
-                                self.creation_date = ds_meta_data.get('CreationDate')
-                                
-                                # Add schema columns for easy access
-                                if self.schema and 'Columns' in self.schema:
-                                    self.columns = self.schema['Columns']
-                                else:
-                                    self.columns = []
-                            else:
-                                # Default values when DS_META is not available
-                                self.data_snapshot_id = None
-                                self.build_id = None
-                                self.row_count = None
-                                self.column_count = None
-                                self.file_size = None
-                                self.schema = None
-                                self.creation_date = None
-                                self.columns = []
-                    
-                    # Get DS_META data for this connection (data snapshot)
-                    ds_meta_data = DS_META_DATA.get(conn.id) if DS_META_DATA else None
-                    df.ds_meta = DSMeta(conn.id, ds_meta_data)
-                
-                data_dict[param_name] = df
-            except Exception as e:
-                raise DataLoadError(f"Failed to load {param_name}. Ensure the input dataset exists at {file_path}: {e}") from e
+        if not conn:
+            # Fallback to mapping_key as RID only if it was explicitly provided via Transform()
+            is_explicit = explicit_params is not None and param_name in explicit_params
+            if not is_explicit:
+                raise DataLoadError(f"Input parameter '{param_name}' not found in dataset connections")
+            rid = mapping_key
         else:
-            raise DataLoadError(f"Input parameter '{param_name}' not found in dataset connections")
+            rid = conn.id
+        
+        file_path = f'{base_path}/data/{rid}/datasets/data.parquet'
+        try:
+            if DF_TYPE == "polars":
+                df = pl.scan_parquet(file_path)
+            else:
+                df = pd.read_parquet(file_path, engine='pyarrow')
+            
+            # Inject ds_meta attribute into the dataframe
+            if transform_id is not None:                                                                                       
+                # Create a custom class for ds_meta with dot notation access
+                class DSMeta:
+                    def __init__(self, rid, ds_meta_data=None):
+                        self.transform_id = rid
+                        self.artifact_dir = f"/data/{rid}/artifacts"
+                        
+                        # Add DS_META data if available
+                        if ds_meta_data:
+                            self.data_snapshot_id = ds_meta_data.get('Id')
+                            self.build_id = ds_meta_data.get('BuildId')
+                            self.row_count = ds_meta_data.get('RowCount')
+                            self.column_count = ds_meta_data.get('ColumnCount')
+                            self.file_size = ds_meta_data.get('FileSize')
+                            self.schema = ds_meta_data.get('Schema')
+                            self.creation_date = ds_meta_data.get('CreationDate')
+                            
+                            # Add schema columns for easy access
+                            if self.schema and 'Columns' in self.schema:
+                                self.columns = self.schema['Columns']
+                            else:
+                                self.columns = []
+                        else:
+                            # Default values when DS_META is not available
+                            self.data_snapshot_id = None
+                            self.build_id = None
+                            self.row_count = None
+                            self.column_count = None
+                            self.file_size = None
+                            self.schema = None
+                            self.creation_date = None
+                            self.columns = []
+                
+                # Get DS_META data for this RID (data snapshot)
+                ds_meta_data = DS_META_DATA.get(rid) if DS_META_DATA else None
+                df.ds_meta = DSMeta(rid, ds_meta_data)
+            
+            data_dict[param_name] = df
+        except Exception as e:
+            raise DataLoadError(f"Failed to load {param_name}. Ensure the input dataset exists at {file_path}: {e}") from e
     return data_dict

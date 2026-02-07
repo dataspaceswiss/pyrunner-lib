@@ -301,6 +301,29 @@ class TestReadParquetFiles:
         with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
             with pytest.raises(DataLoadError, match="Input parameter 'missing' not found"):
                 read_parquet_files(connections, ["missing"], "/tmp")
+
+    def test_read_parquet_files_explicit_rid_fallback(self):
+        """Test that explicit RIDs can fall back while others cannot."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create test parquet file for the "explicit" RID
+            df = pl.DataFrame({"a": [1, 2, 3]})
+            rid = "explicit-rid"
+            os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
+            df.write_parquet(os.path.join(temp_dir, "data", rid, "datasets", "data.parquet"))
+            
+            connections = {} # Empty connections
+            
+            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
+                # 1. Explicit RID should work even if not in connections
+                param_mapping = {"df": rid}
+                explicit_params = {"df"}
+                result = read_parquet_files(connections, param_mapping, temp_dir, explicit_params=explicit_params)
+                assert "df" in result
+                
+                # 2. Non-explicit RID should fail if not in connections
+                param_mapping = {"other": "some-rid"}
+                with pytest.raises(DataLoadError, match="Input parameter 'other' not found"):
+                    read_parquet_files(connections, param_mapping, temp_dir, explicit_params=set())
     
     def test_read_parquet_files_configuration_not_loaded(self):
         """Test reading parquet files without configuration."""
