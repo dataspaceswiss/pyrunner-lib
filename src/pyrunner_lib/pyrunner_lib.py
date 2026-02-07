@@ -306,7 +306,7 @@ def transform(transform_id: str, base_path: str = "") -> None:
         print("--------- Build successful ---------")
         print(f"Read Time:      {read_time:.2f} sec")
         print(f"Transform Time: {transform_time:.2f} sec")
-        if health_checks:
+        if health_check_time:
             print(f"Health Check Time: {health_check_time:.2f} sec")
         print(f"Write Time:     {write_time:.2f} sec")
         
