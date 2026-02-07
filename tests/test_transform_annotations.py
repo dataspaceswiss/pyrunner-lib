@@ -202,7 +202,7 @@ def transform(input2):
             json.dump(connections, f)
             
         with patch('pyrunner_lib.pyrunner_lib.read_parquet_files') as mock_read:
-            def side_effect(connections, param_mapping, base_path, transform_id):
+            def side_effect(connections, param_mapping, base_path, transform_id, explicit_params=None):
                 return {k: pl.LazyFrame() for k in param_mapping}
             mock_read.side_effect = side_effect
             with patch('pyrunner_lib.pyrunner_lib.write_df_to_parquet'):
