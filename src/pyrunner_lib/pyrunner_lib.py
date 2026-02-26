@@ -385,6 +385,10 @@ def read_parquet_files(connections: Dict[str, Connection], params: Union[List[st
             else:
                 df = pd.read_parquet(file_path, engine='pyarrow')
             
+            # Limit rows if IS_DRAFT_BUILD is set to true
+            if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true":
+                df = df.head(1_000_000)
+            
             # Inject ds_meta attribute into the dataframe
             if transform_id is not None:                                                                                       
                 # Create a custom class for ds_meta with dot notation access

@@ -83,6 +83,8 @@ class InputSourceTracer:
             return self._handle_passthrough(op_data)
         elif op_type == "WithColumns":
             return self._handle_with_columns(op_data)
+        elif op_type == "HStack":
+            return self._handle_hstack(op_data)
         else:
             # Generic handler for unknown operations with input
             return self._handle_generic(op_data)
@@ -95,12 +97,17 @@ class InputSourceTracer:
         # Extract file path from various source structures
         if "Paths" in sources:
             paths = sources["Paths"]
-            if paths and isinstance(paths[0], dict) and "Local" in paths[0]:
-                file_path = paths[0]["Local"]
+            if paths and isinstance(paths[0], dict):
+                if "Local" in paths[0]:
+                    file_path = paths[0]["Local"]
+                elif "inner" in paths[0]:
+                    file_path = paths[0]["inner"]
             elif paths and isinstance(paths[0], str):
                 file_path = paths[0]
         elif "Local" in sources:
             file_path = sources["Local"]
+        elif "inner" in sources:
+            file_path = sources["inner"]
         else:
             file_path = str(sources)
         
@@ -235,12 +242,18 @@ class InputSourceTracer:
         """
         # Extract columns being unnested
         columns_to_unnest = []
+        
+        # Try finding Union in various places (Polars versions/plans vary)
+        union_data = None
         if "Union" in unnest_data:
             union_data = unnest_data["Union"]
-            if isinstance(union_data, list):
-                for item in union_data:
-                    if "ByName" in item and "names" in item["ByName"]:
-                        columns_to_unnest.extend(item["ByName"]["names"])
+        elif "columns" in unnest_data and isinstance(unnest_data["columns"], dict) and "Union" in unnest_data["columns"]:
+            union_data = unnest_data["columns"]["Union"]
+            
+        if isinstance(union_data, list):
+            for item in union_data:
+                if "ByName" in item and "names" in item["ByName"]:
+                    columns_to_unnest.extend(item["ByName"]["names"])
         
         # For unnested struct columns, we need to find the source for the struct
         # and map it to the resulting field columns
@@ -249,8 +262,6 @@ class InputSourceTracer:
         for struct_col in columns_to_unnest:
             if struct_col in input_sources:
                 struct_sources = input_sources[struct_col]
-                # The struct column's sources will be inherited by its fields
-                # We need to read the schema to find the field names
                 for source_id in struct_sources:
                     file_path, _ = self._parse_source_id(source_id)
                     if file_path:
@@ -258,11 +269,9 @@ class InputSourceTracer:
                             schema = pl.read_parquet_schema(file_path)
                             if struct_col in schema:
                                 struct_dtype = schema[struct_col]
-                                # If it's a struct, get field names
                                 if hasattr(struct_dtype, 'fields'):
                                     for field in struct_dtype.fields:
                                         field_name = field.name
-                                        # Map field to the struct column's source
                                         field_source = self._get_source_id(file_path, struct_col)
                                         local_sources[field_name] = {field_source}
                                         self.column_sources[field_name].add(field_source)
@@ -280,7 +289,23 @@ class InputSourceTracer:
         input_sources = {}
         if "input" in op_data:
             input_sources = self._analyze_plan(op_data["input"])
-        return input_sources
+        
+        local_sources = {}
+        # Keys are passed through
+        for key_expr in op_data.get("keys", []):
+            col_name, col_sources = self._extract_expr_sources(key_expr, input_sources)
+            if col_name and col_sources:
+                local_sources[col_name] = col_sources
+                self.column_sources[col_name].update(col_sources)
+        
+        # Process aggregations
+        for agg_expr in op_data.get("aggs", []):
+            col_name, col_sources = self._extract_expr_sources(agg_expr, input_sources)
+            if col_name and col_sources:
+                local_sources[col_name] = col_sources
+                self.column_sources[col_name].update(col_sources)
+                
+        return local_sources if local_sources else input_sources
     
     def _handle_aggregate(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
         """Handle Aggregate operation."""
@@ -306,6 +331,21 @@ class InputSourceTracer:
         
         local_sources = dict(input_sources)
         for expr in op_data.get("expr", []):
+            col_name, col_sources = self._extract_expr_sources(expr, input_sources)
+            if col_name and col_sources:
+                local_sources[col_name] = col_sources
+                self.column_sources[col_name].update(col_sources)
+        return local_sources
+
+    def _handle_hstack(self, op_data: Dict[str, Any]) -> Dict[str, Set[str]]:
+        """Handle HStack operation - adds new columns (Polars with_columns logic)."""
+        input_sources = {}
+        if "input" in op_data:
+            input_sources = self._analyze_plan(op_data["input"])
+        
+        local_sources = dict(input_sources)
+        # HStack uses exprs (plural)
+        for expr in op_data.get("exprs", []):
             col_name, col_sources = self._extract_expr_sources(expr, input_sources)
             if col_name and col_sources:
                 local_sources[col_name] = col_sources
@@ -343,7 +383,7 @@ class InputSourceTracer:
                         merged[col].update(sources)
                         self.column_sources[col].update(sources)
         
-        return dict(merged)
+        return dict(merged) if merged else op_data.get("input", {}) if isinstance(op_data.get("input"), dict) else {}
     
     def _extract_expr_sources(self, expr: Dict[str, Any], input_sources: Dict[str, Set[str]]) -> tuple:
         """
@@ -387,6 +427,8 @@ class InputSourceTracer:
             agg_data = expr["Agg"]
             for agg_type, agg_expr in agg_data.items():
                 if isinstance(agg_expr, dict):
+                    if "input" in agg_expr:
+                        return self._extract_expr_sources(agg_expr["input"], input_sources)
                     return self._extract_expr_sources(agg_expr, input_sources)
             return None, set()
         
@@ -436,9 +478,36 @@ class InputSourceTracer:
     def get_column_sources(self) -> Dict[str, List[str]]:
         """
         Return a dictionary mapping each output column to its original source columns.
-        Format: {column_name: [file_path|column_name, ...]}
+        Format: {column_name: [transform_rid|column_name, ...]}
         """
-        return {col: list(sources) for col, sources in self.column_sources.items() if sources}
+        results = {}
+        # Regex to extract RID from path like ./data/rid.transform.uuid/datasets/data.parquet
+        rid_pattern = re.compile(r'rid\.transform\.[a-f0-9a-zA-Z-]+')
+        
+        for col, sources in self.column_sources.items():
+            if not sources:
+                continue
+                
+            formatted_sources = set()
+            for source_id in sources:
+                file_path, col_name = self._parse_source_id(source_id)
+                if file_path:
+                    match = rid_pattern.search(file_path)
+                    if match:
+                        rid = match.group(0)
+                        formatted_sources.add(f"{rid}|{col_name}")
+                    else:
+                        # Use full path if no RID pattern found (important for library tests)
+                        formatted_sources.add(f"{file_path}|{col_name}")
+                else:
+                    # Fallback for columns that couldn't be traced to a file
+                    # Keep as is (usually just the column name from fallback in _extract_expr_sources)
+                    formatted_sources.add(source_id)
+            
+            if formatted_sources:
+                results[col] = sorted(list(formatted_sources))
+            
+        return results
 
 
 def trace_input_sources(json_plan: str) -> Dict[str, List[str]]:

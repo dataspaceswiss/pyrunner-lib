@@ -302,6 +302,55 @@ class TestReadParquetFiles:
             with pytest.raises(DataLoadError, match="Input parameter 'missing' not found"):
                 read_parquet_files(connections, ["missing"], "/tmp")
 
+    def test_read_parquet_files_draft_build_limit(self):
+        """Test that read_parquet_files limits rows to 1,000,000 when IS_DRAFT_BUILD is true."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create test parquet file with some dummy data
+            # Use 5 rows for simplicity in testing the .head() call
+            df = pl.DataFrame({"a": range(10)})
+            rid = "test-rid"
+            os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
+            parquet_path = os.path.join(temp_dir, "data", rid, "datasets", "data.parquet")
+            df.write_parquet(parquet_path)
+            
+            conn = Connection(id=rid, path="test.py", inputs=[])
+            connections = {"input1": conn}
+            
+            # Case 1: IS_DRAFT_BUILD is "true", limit to 2 rows for test
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}):
+                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
+                    # We need to mock the 1,000_000 to something smaller for the test 
+                    # OR just verify that .head() was called.
+                    # Actually, the implementation uses a hardcoded 1_000_000.
+                    # To test it properly with a smaller dataset, we can check if it returns all rows if < 1M.
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)
+                    df_result = result["input1"].collect()
+                    assert len(df_result) == 10
+            
+            # Case 2: Verify it limits if we had more than 1M rows (mocking .head)
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}):
+                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
+                    with patch('polars.LazyFrame.head') as mock_head:
+                        mock_head.return_value = pl.LazyFrame({"a": [1]})
+                        read_parquet_files(connections, {"input1": rid}, temp_dir)
+                        mock_head.assert_called_once_with(1_000_000)
+
+            # Case 3: Verify it does NOT limit if IS_DRAFT_BUILD is not set
+            with patch.dict(os.environ, {}, clear=True):
+                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
+                    with patch('polars.LazyFrame.head') as mock_head:
+                        read_parquet_files(connections, {"input1": rid}, temp_dir)
+                        mock_head.assert_not_called()
+
+            # Case 4: Verify Pandas limit
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}):
+                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'):
+                    with patch('pandas.read_parquet') as mock_read:
+                        mock_df = MagicMock()
+                        mock_read.return_value = mock_df
+                        read_parquet_files(connections, {"input1": rid}, temp_dir)
+                        mock_df.head.assert_called_once_with(1_000_000)
+
     def test_read_parquet_files_explicit_rid_fallback(self):
         """Test that explicit RIDs can fall back while others cannot."""
         with tempfile.TemporaryDirectory() as temp_dir:
