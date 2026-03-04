@@ -61,6 +61,40 @@ warnings.filterwarnings(
     category=UserWarning
 )
 
+
+class DSMeta:
+    """Metadata for a dataset with dot notation access."""
+    def __init__(self, rid: str, base_path: str, ds_meta_data: Optional[Dict[str, Any]] = None):
+        self.transform_id = rid
+        self.artifact_dir = f"{base_path}/data/{rid}/artifacts"
+
+        # Add DS_META data if available
+        if ds_meta_data:
+            self.data_snapshot_id = ds_meta_data.get('Id')
+            self.build_id = ds_meta_data.get('BuildId')
+            self.row_count = ds_meta_data.get('RowCount')
+            self.column_count = ds_meta_data.get('ColumnCount')
+            self.file_size = ds_meta_data.get('FileSize')
+            self.schema = ds_meta_data.get('Schema')
+            self.creation_date = ds_meta_data.get('CreationDate')
+
+            # Add schema columns for easy access
+            if self.schema and 'Columns' in self.schema:
+                self.columns = self.schema['Columns']
+            else:
+                self.columns = []
+        else:
+            # Default values when DS_META is not available
+            self.data_snapshot_id = None
+            self.build_id = None
+            self.row_count = None
+            self.column_count = None
+            self.file_size = None
+            self.schema = None
+            self.creation_date = None
+            self.columns = []
+
+
 # JSON Schema Models
 class Config(BaseModel):
     python: str
@@ -391,41 +425,9 @@ def read_parquet_files(connections: Dict[str, Connection], params: Union[List[st
             
             # Inject ds_meta attribute into the dataframe
             if transform_id is not None:                                                                                       
-                # Create a custom class for ds_meta with dot notation access
-                class DSMeta:
-                    def __init__(self, rid, ds_meta_data=None):
-                        self.transform_id = rid
-                        self.artifact_dir = f"/data/{rid}/artifacts"
-                        
-                        # Add DS_META data if available
-                        if ds_meta_data:
-                            self.data_snapshot_id = ds_meta_data.get('Id')
-                            self.build_id = ds_meta_data.get('BuildId')
-                            self.row_count = ds_meta_data.get('RowCount')
-                            self.column_count = ds_meta_data.get('ColumnCount')
-                            self.file_size = ds_meta_data.get('FileSize')
-                            self.schema = ds_meta_data.get('Schema')
-                            self.creation_date = ds_meta_data.get('CreationDate')
-                            
-                            # Add schema columns for easy access
-                            if self.schema and 'Columns' in self.schema:
-                                self.columns = self.schema['Columns']
-                            else:
-                                self.columns = []
-                        else:
-                            # Default values when DS_META is not available
-                            self.data_snapshot_id = None
-                            self.build_id = None
-                            self.row_count = None
-                            self.column_count = None
-                            self.file_size = None
-                            self.schema = None
-                            self.creation_date = None
-                            self.columns = []
-                
                 # Get DS_META data for this RID (data snapshot)
                 ds_meta_data = DS_META_DATA.get(rid) if DS_META_DATA else None
-                df.ds_meta = DSMeta(rid, ds_meta_data)
+                df.ds_meta = DSMeta(rid, base_path, ds_meta_data)
             
             data_dict[param_name] = df
         except Exception as e:
