@@ -511,6 +511,35 @@ class TestRunHealthChecks:
                 assert "passed" in check
                 assert "error" in check
 
+    def test_run_health_checks_accumulates_builders_for_same_column(self):
+        """Test that separate builders for one column retain every check."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            lf = pl.LazyFrame({"id": [1, 2, 3]})
+
+            report = run_health_checks(
+                lf,
+                [Check("id").no_nulls(), Check("id").unique()],
+            )
+
+            assert report["summary"]["total_columns"] == 1
+            assert report["summary"]["total_checks"] == 2
+            assert [
+                check["check"] for check in report["columns"]["id"]["checks"]
+            ] == ["no_nulls", "unique"]
+
+    def test_run_health_checks_skips_empty_builders(self):
+        """Test that builders without checks do not create empty reports."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+
+            report = run_health_checks(pl.LazyFrame({"id": [1]}), [Check("id")])
+
+            assert report["summary"]["total_columns"] == 0
+            assert report["summary"]["total_checks"] == 0
+            assert report["summary"]["overall_pass_percentage"] == 100.0
+            assert report["columns"] == {}
+
 
 class TestPandasDataFrame:
     """Test run_health_checks with Pandas DataFrames."""

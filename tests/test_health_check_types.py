@@ -66,3 +66,8 @@ class TestHealthCheckTypes:
             
             assert report["summary"]["passed"] == 1
             assert report["summary"]["failed"] == 0
+
+    def test_unsupported_frame_type(self):
+        """Test that unsupported inputs fail before checks execute."""
+        with pytest.raises(TypeError, match="frame must be"):
+            run_health_checks({"col": [1, 2, 3]}, [Check("col").no_nulls()])

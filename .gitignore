@@ -1,6 +1,9 @@
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv/
@@ -10,11 +13,20 @@ venv/
 build/
 dist/
 *.egg-info/
+htmlcov/
 
 # Editor settings
 .vscode/
+
+# Local agent skill links
+.agents/
 
 # OS files
 .DS_Store
 .coverage
 coverage.xml
+
+# Temporary files
+*.tmp
+*.temp
+*~

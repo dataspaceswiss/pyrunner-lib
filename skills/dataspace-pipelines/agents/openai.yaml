@@ -1,0 +1,4 @@
+interface:
+  display_name: "DataSpace Pipelines"
+  short_description: "Build DataSpace pipelines and hosted data apps"
+  default_prompt: "Use $dataspace-pipelines to build or update this DataSpace pipeline or hosted dashboard safely."

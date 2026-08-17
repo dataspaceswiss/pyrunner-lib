@@ -131,7 +131,7 @@ class TestWriteColumnTraceFile:
             # Create a simple LazyFrame
             df = pl.LazyFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
             
-            with patch('pyrunner_lib.pyrunner_lib.trace_input_sources') as mock_trace:
+            with patch('pyrunner_lib.pyrunner_lib.trace_lazyframe_sources') as mock_trace:
                 mock_trace.return_value = {"a": ["source1"], "b": ["source2"]}
                 
                 write_column_trace_file(df, "test_transform", temp_dir)
@@ -144,6 +144,7 @@ class TestWriteColumnTraceFile:
                 with open(trace_file) as f:
                     data = json.load(f)
                     assert data == {"a": ["source1"], "b": ["source2"]}
+                mock_trace.assert_called_once_with(df)
     
 
 class TestWriteDfToParquet:
@@ -480,5 +481,4 @@ def transform(input1):
                         
                         with pytest.raises(ModuleLoadError, match="does not contain a 'transform' function"):
                             transform("test_transform", temp_dir)
-
 
