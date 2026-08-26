@@ -34,9 +34,18 @@ Use `_connections.json` to resolve transform RIDs to source files and upstream t
 
 Whenever a mapped Python file moves or is renamed, update its `path` in `_connections.json` in the same change. A stale path breaks execution.
 
-By default, this runner resolves an unannotated transform parameter by matching the parameter name to an upstream connection's filename stem. Renaming `src/source_clean.py` to `src/source/clean.py` changes that legacy name from `source_clean` to `clean` and can break downstream parameters even when the RID is unchanged. Search downstream transform signatures whenever a rename changes a stem.
+DataSpace recognizes three input declaration forms.
 
-Bind a parameter explicitly to keep it independent of filenames:
+Use a bare parameter when name-based resolution is unambiguous. This form can resolve local transforms and published transforms from a linked foreign workspace:
+
+```python
+def transform(input):
+    return input
+```
+
+The runner resolves an unannotated parameter by matching its name to an upstream connection's filename stem. Renaming `src/source_clean.py` to `src/source/clean.py` changes that legacy name from `source_clean` to `clean` and can break downstream parameters even when the RID is unchanged. Search downstream transform signatures whenever a rename changes a stem.
+
+Bind a parameter explicitly by RID with a parameter annotation:
 
 ```python
 from pyrunner_lib import Transform
@@ -46,7 +55,20 @@ def transform(source_data: Transform("rid.transform.source")):
     return source_data
 ```
 
-The `@transform(source_data=Transform("rid.transform.source"))` decorator form is also supported. Follow existing repository conventions when choosing between annotations and decorators.
+The equivalent decorator form is:
+
+```python
+from pyrunner_lib import Transform, transform
+
+
+@transform(source_data=Transform("rid.transform.source"))
+def build_output(source_data):
+    return source_data
+```
+
+All three forms can declare an input from a linked foreign workspace. Prefer either explicit RID form when different workspaces contain transforms with the same name; the resolved connection preserves cross-workspace lineage.
+
+`Transform("WORKSPACE.transform")`, for example `orders: Transform("INSTACART.orders")`, is a planned DataSpace syntax and is not yet supported. Until it is implemented, use the foreign transform's RID in the annotation or decorator binding.
 
 The conventional entry point is:
 
