@@ -1146,7 +1146,7 @@ wheels = [
 
 [[package]]
 name = "pyrunner-lib"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1179,7 +1179,7 @@ requires-dist = [
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.12.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pandas", specifier = ">=1.5.0" },
-    { name = "polars", specifier = ">=1.34.0" },
+    { name = "polars", specifier = ">=1.34.0,<2" },
     { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pygments", marker = "extra == 'dev'", specifier = ">=2.20.0" },

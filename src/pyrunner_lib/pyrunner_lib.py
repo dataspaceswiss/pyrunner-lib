@@ -368,17 +368,17 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
                 # Default to parameter name
                 param_mapping[name] = name
 
-        # Read input data
+        # A lazy query only runs when its output is written, so reading, transforming
+        # and writing cannot be timed separately
         start_time = time.time()
+
+        # Read input data
         data_dict = read_parquet_files(
             connections, param_mapping, base_path, transform_id, explicit_params
         )
-        read_time = time.time() - start_time
 
         # Execute transformation
-        start_time = time.time()
         transform_result = main_func(**data_dict)
-        transform_time = time.time() - start_time
 
         # Handle optional health_checks return
         if isinstance(transform_result, tuple) and len(transform_result) == 2:
@@ -388,26 +388,17 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
             health_checks = None
 
         # Execute health check if provided
-        health_check_time = None
         if health_checks and isinstance(
             result, (pl.LazyFrame, pl.DataFrame, pd.DataFrame)
         ):
-            start_time = time.time()
             run_health_checks(result, health_checks)
-            health_check_time = time.time() - start_time
 
         # Write output
-        start_time = time.time()
         output_path = f"{base_path}/data/{transform_conn.id}/datasets/data.parquet"
         write_df_to_parquet(result, output_path, transform_conn.id, base_path)
-        write_time = time.time() - start_time
 
         print("--------- Build successful ---------")
-        print(f"Read Time:      {read_time:.2f} sec")
-        print(f"Transform Time: {transform_time:.2f} sec")
-        if health_check_time is not None:
-            print(f"Health Check Time: {health_check_time:.2f} sec")
-        print(f"Write Time:     {write_time:.2f} sec")
+        print(f"Execution Time: {time.time() - start_time:.2f} sec")
 
     except PyrunnerError:
         # Re-raise our custom exceptions
