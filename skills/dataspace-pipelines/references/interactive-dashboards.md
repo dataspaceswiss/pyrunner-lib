@@ -8,6 +8,13 @@ This supports purpose-built data applications—React, Vite, or another frontend
 
 Use this pattern when the UI needs several views, rich interactions, user-driven filters, on-demand queries, or a domain-specific workflow. Prefer a generated static HTML dashboard when the data is small and the interface is simple.
 
+## How DataSpace 1.13 hosts it
+
+- The artifact folder of a build is served below `/api/builds/<build ID>/artifacts/`, and of an exported transform also below `/api/transforms/<transform ID>/public/artifacts/`. A folder with an `index.html` serves that file; one without gets a file listing.
+- DataSpace inserts `<base href="…/artifacts/…">` right after a literal `<head>` tag in every served HTML file, so relative URLs resolve against the artifact folder. Keep a plain `<head>` with no attributes, or the base is not inserted.
+- There is no fallback for client-side routes: any other path that is not a file returns 404. Use hash routing.
+- The web app embeds the dashboard in an iframe on the API origin, and it runs with the viewer's signed-in session. Same-origin API requests carry that session, so the dashboard can read what the viewer can read without any token. It can also do everything else the viewer can, so opening a dashboard means trusting the people who can change its code, and code from an unknown author should be reviewed before anyone opens it. A dashboard must only read, and must not load scripts from a CDN or another origin: bundle every dependency. A public link can be opened by someone who is not signed in, so handle a 401 with a clear message.
+
 ## Inspect before implementing
 
 Treat the deployed platform and an existing working client on the same deployment as the source of truth for the API contract.
@@ -17,8 +24,7 @@ Before editing:
 1. Find the frontend directory, package manager lockfile, build script, bundler configuration, and transform wrapper.
 2. Find the existing DataSpace API client and record its base-URL resolution, endpoint path, request payload, response schema, authentication behavior, and error handling.
 3. Determine how dataset, snapshot, build, or transform identifiers reach the frontend.
-4. Check whether DataSpace serves the dashboard below a nested artifact path and whether client-side route fallback is available.
-5. Reuse the repository's framework, package manager, API client, and build command unless the task explicitly requests a migration.
+4. Reuse the repository's framework, package manager, API client, and build command unless the task explicitly requests a migration.
 
 Do not guess private endpoint paths from examples or copy tenant-specific hostnames, resource IDs, signed URLs, access tokens, cookies, or secrets into the skill or source code.
 
@@ -73,7 +79,7 @@ For bundlers such as Vite:
 - Configure a relative asset base such as `./` when the application is served below a nested artifact URL.
 - Keep every hashed JavaScript, CSS, font, image, worker, and WebAssembly asset referenced by `index.html` inside the artifact tree.
 - Check bundler `public/` assets, dynamic imports, manifest icons, service workers, and runtime-configuration fetches for the same relative-base behavior.
-- Prefer hash routing or a single-page routing strategy known to work without a server-side history fallback.
+- Use hash routing; DataSpace has no server-side history fallback.
 - Disable production source maps unless they are intentionally required, and scan any retained maps for private source, hostnames, identifiers, or configuration.
 - Do not silently serve an old bundle after a compilation failure.
 - Do not write the automatic parquet output manually; return the dataframe and let the runner persist it.
@@ -82,7 +88,7 @@ For bundlers such as Vite:
 
 Separate public routing metadata from secrets. Dataset snapshot IDs, transform IDs, API origin selection, and feature flags may be emitted as a small runtime configuration file or an inline non-secret object during the build. Keep credentials out of compiled JavaScript.
 
-Prefer deployment-relative or same-origin API URLs when the platform supports them. If the API is on another permitted origin, use the deployment's configured public API base and existing authentication flow. Do not bypass DataSpace authorization or fabricate bearer tokens in browser code.
+Call the API with same-origin relative URLs such as `/api/...`, so requests carry the viewer's session. Do not bypass DataSpace authorization or fabricate bearer tokens in browser code.
 
 A build-time secret does not become safe merely because it is compiled into JavaScript. A static hosted dashboard cannot protect a service token. If the query API requires a service credential rather than the signed-in user's authorized session, stop and use a platform-supported authenticated flow or an authorized server-side proxy.
 

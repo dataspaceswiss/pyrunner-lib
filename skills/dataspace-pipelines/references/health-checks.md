@@ -19,16 +19,16 @@ def transform(input_df):
     return input_df, checks
 ```
 
-The runner accepts checks alongside a Polars `LazyFrame`, Polars `DataFrame`, or pandas `DataFrame`. Checks operate through aggregate queries on a lazy frame rather than collecting the complete dataset. Preserve that behavior in custom checks.
+The runner accepts checks alongside a Polars `LazyFrame`, Polars `DataFrame`, or pandas `DataFrame`. It writes the output first, then runs the checks on the written parquet file, so each check reads only the columns it needs and never re-runs the transform. Checks operate through aggregate queries rather than collecting the complete dataset. Preserve that behavior in custom checks.
 
-Each check executes its aggregate against the input plan. On very large datasets, keep the check set intentional: exact uniqueness and distinct-count checks may require engine state proportional to column cardinality even though only scalar results return to Python. Never cache or collect the full frame merely to share work between checks.
+On very large datasets, keep the check set intentional: exact uniqueness and distinct-count checks may require engine state proportional to column cardinality even though only scalar results return to Python. Never cache or collect the full frame merely to share work between checks.
 
 Checks may be chained on one `Check` builder or split across multiple builders for the same column. The runner preserves their registration order and executes all of them.
 
 ## Severity
 
 - `warn` is the default. Record the failed check in the report but allow the transform build to continue.
-- `fail` records the result, then raises `HealthCheckFailure` after all checks execute and prevents a successful build.
+- `fail` records the result, then raises `HealthCheckFailure` after all checks execute and prevents a successful build. The output has already been written by then, so the failed build keeps its dataset for inspection; downstream builds keep reading the last successful build.
 
 Choose severity from the data contract. Use `fail` for invariants required by downstream consumers and `warn` for monitoring thresholds that should remain visible without stopping delivery.
 
@@ -47,7 +47,7 @@ The runner writes the report before raising for fail-severity results, so inspec
 | `.null_percentage(max_pct=0.0, severity=None)` | Allow at most `max_pct` percent null values, using a value from 0 through 100. |
 | `.numeric_check(eq=None, gt=None, gte=None, lt=None, lte=None, not_eq=None, sum_eq=None, severity=None)` | Apply per-value numeric comparisons and/or require the column sum to equal `sum_eq`. |
 | `.distinct_count(expected_count, severity=None)` | Require exactly the expected number of distinct values. |
-| `.custom_check(name, severity, func)` | Run a custom function receiving `(lazy_frame, column_name)`. |
+| `.custom_check(name, severity, func, violations=None)` | Run a custom function receiving `(lazy_frame, column_name)`. `violations(column_name)` optionally returns an expression that is true for the rows that break the check. |
 
 Chain `.no_nulls()` or `.null_percentage()` explicitly when nulls are part of the contract; a range, regex, allowlist, or numeric predicate is not a substitute for a null policy.
 
@@ -61,7 +61,9 @@ Account for these current API semantics:
 
 ## Custom checks
 
-Define a custom function as `func(lazy_frame, column_name)`. Collect only bounded aggregate results and raise `ValueError` with a useful, non-sensitive message when the condition fails. A custom check may inspect multiple columns, but its result is reported under the builder's column name.
+Define a custom function as `func(lazy_frame, column_name)`. The lazy frame scans the written dataset file. Collect only bounded aggregate results and raise `ValueError` with a useful, non-sensitive message when the condition fails. A custom check may inspect multiple columns, but its result is reported under the builder's column name.
+
+Pass `violations` when the check is row-level, so DataSpace can show the rows that break it. Without it, the check reports only its message.
 
 ## Health report
 
@@ -70,7 +72,9 @@ The runner writes `META_FOLDER/health_report.json` with:
 - A UTC timestamp.
 - Summary counts for columns, checks, passed checks, failed checks, and the overall pass percentage.
 - Per-column pass percentages.
-- One entry per check containing its name, severity, pass status, and error message.
+- One entry per check containing its `id`, name, severity, pass status, error message, and `rows`.
+
+For a failed row-level check, `rows` lists the positions of the first 1000 violating rows in the written dataset file. It holds row numbers only, never row values. `distinct_count`, `numeric_check(sum_eq=...)` on its own, and custom checks without `violations` judge the whole column and list no rows.
 
 Treat the JSON report as a build artifact for diagnostics and monitoring. Do not change its schema in a pipeline project; that schema belongs to `pyrunner-lib`.
 
@@ -83,7 +87,7 @@ Test the transform result and the checks together:
 3. Exercise every fail-severity invariant and confirm `HealthCheckFailure` occurs only after the report is written.
 4. Cover empty input, all-null input, wrong data types, missing columns, boundary values, duplicates, and unexpected values where applicable.
 5. Confirm custom checks collect only bounded aggregate results rather than the full dataset.
-6. Run the target transform by RID and inspect `META_FOLDER/health_report.json` in the generated build tree.
+6. Run the target transform by RID with `META_FOLDER` set, and inspect `META_FOLDER/health_report.json` in the generated build tree.
 
 ## Official documentation
 

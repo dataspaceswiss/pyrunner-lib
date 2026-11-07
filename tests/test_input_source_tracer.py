@@ -1,13 +1,12 @@
 """Tests for input_source_tracer module."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
-import pytest
 import polars as pl
-import tempfile
-import os
-from unittest.mock import patch, MagicMock
+import pytest
 
 from pyrunner_lib.input_source_tracer import (
     InputSourceTracer,
@@ -72,7 +71,7 @@ class TestInputSourceTracer:
             # Check that sources contain the file path
             for col in ["col1", "col2"]:
                 sources = tracer.column_sources[col]
-                assert any(parquet_file in source for source in sources)
+                assert any(file_path == parquet_file for file_path, _ in sources)
         finally:
             # Clean up
             os.unlink(parquet_file)
@@ -418,7 +417,7 @@ class TestInputSourceTracer:
             assert "col1" in sources
             # renamed should trace back to col2
             assert "renamed" in sources
-            assert any("col2" in s for s in sources["renamed"])
+            assert any(s["column"] == "col2" for s in sources["renamed"])
         finally:
             os.unlink(parquet_file)
     
@@ -428,8 +427,8 @@ class TestInputSourceTracer:
         
         # Add some test sources
         tracer.column_sources = {
-            "col1": {"source1", "source2"},
-            "col2": {"source3"}
+            "col1": {("source1", "a"), ("source2", "b")},
+            "col2": {("source3", "c")}
         }
         
         sources = tracer.get_column_sources()
@@ -437,8 +436,8 @@ class TestInputSourceTracer:
         assert "col1" in sources
         assert "col2" in sources
         assert isinstance(sources["col1"], list)
-        assert "source1" in sources["col1"]
-        assert "source2" in sources["col1"]
+        assert {"dataset_rid": "source1", "column": "a"} in sources["col1"]
+        assert {"dataset_rid": "source2", "column": "b"} in sources["col1"]
 
 
 class TestTraceLazyFrameSources:
@@ -501,8 +500,8 @@ class TestTraceLazyFrameSources:
             for source_list in sources.values():
                 all_sources.extend(source_list)
             
-            file1_found = any(parquet_file1 in source for source in all_sources)
-            file2_found = any(parquet_file2 in source for source in all_sources)
+            file1_found = any(source["dataset_rid"] == parquet_file1 for source in all_sources)
+            file2_found = any(source["dataset_rid"] == parquet_file2 for source in all_sources)
             
             assert file1_found, "File1 not found in any source"
             assert file2_found, "File2 not found in any source"
@@ -544,8 +543,8 @@ class TestTraceLazyFrameSources:
                 assert col in sources, f"Column {col} not found in sources"
                 source_list = sources[col]
                 
-                file1_found = any(parquet_file1 in source for source in source_list)
-                file2_found = any(parquet_file2 in source for source in source_list)
+                file1_found = any(source["dataset_rid"] == parquet_file1 for source in source_list)
+                file2_found = any(source["dataset_rid"] == parquet_file2 for source in source_list)
                 assert file1_found, f"File1 not found in sources for column {col}"
                 assert file2_found, f"File2 not found in sources for column {col}"
                 assert len(source_list) >= 2, f"Expected at least 2 sources for column {col}, got {len(source_list)}"
@@ -594,7 +593,7 @@ class TestTraceLazyFrameSources:
                 for source_list in sources.values():
                     all_sources.extend(source_list)
 
-                file_found = any(parquet_file in source for source in all_sources)
+                file_found = any(source["dataset_rid"] == parquet_file for source in all_sources)
                 assert file_found, f"Original file not found in sources for {op_name}"
                     
         finally:
@@ -663,8 +662,8 @@ class TestTraceLazyFrameSources:
             assert "value2" in sources, "value2 column not tracked"
             
             # Both should reference the same file
-            assert any(parquet_file in s for s in sources["value"])
-            assert any(parquet_file in s for s in sources["value2"])
+            assert any(s["dataset_rid"] == parquet_file for s in sources["value"])
+            assert any(s["dataset_rid"] == parquet_file for s in sources["value2"])
             
         finally:
             os.unlink(parquet_file)
@@ -679,14 +678,25 @@ def _write_source(root: Path, rid: str, data: dict) -> tuple[Path, str]:
 
 def _trace(
     lazyframe: pl.LazyFrame, *, schema_first: bool = False
-) -> dict[str, list[str]]:
+) -> dict[str, list[dict[str, str]]]:
     if schema_first:
         lazyframe.collect_schema()
     return trace_lazyframe_sources(lazyframe)
 
 
-def _source(rid: str, column: str) -> str:
-    return f"{rid}|{column}"
+class _Source(dict):
+    """A lineage entry that can sit in a set, for order-free comparisons."""
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash((self["dataset_rid"], self["column"]))
+
+
+def _source(rid: str, column: str) -> _Source:
+    return _Source(dataset_rid=rid, column=column)
+
+
+def _entries(entries: list[dict[str, str]]) -> set[_Source]:
+    return {_Source(entry) for entry in entries}
 
 
 @pytest.fixture
@@ -735,7 +745,10 @@ def test_multiple_scan_paths_contribute_to_each_output(tmp_path: Path):
         tmp_path, "rid.transform.b-2", {"id": [2], "value": [20]}
     )
     result = _trace(pl.scan_parquet([path_a, path_b]))
-    assert result["value"] == sorted([_source(rid_a, "value"), _source(rid_b, "value")])
+    assert result["value"] == sorted(
+        [_source(rid_a, "value"), _source(rid_b, "value")],
+        key=lambda entry: (entry["dataset_rid"], entry["column"]),
+    )
 
 
 def test_alias_uses_expression_source_not_same_named_input(sources):
@@ -755,7 +768,7 @@ def test_with_columns_replacement_uses_its_expression_dependencies(sources):
     result = _trace(
         sources["left"].with_columns((pl.col("value") + pl.col("other")).alias("name"))
     )
-    assert set(result["name"]) == {
+    assert _entries(result["name"]) == {
         _source(sources["left_rid"], "value"),
         _source(sources["left_rid"], "other"),
     }
@@ -807,7 +820,7 @@ def test_drop_does_not_leak_removed_columns(sources):
 )
 def test_expression_dependencies(sources, expression, output, dependencies):
     result = _trace(sources["left"].select(expression))
-    assert set(result[output]) == {
+    assert _entries(result[output]) == {
         _source(sources["left_rid"], column) for column in dependencies
     }
 
@@ -818,7 +831,7 @@ def test_horizontal_function_tracks_all_value_dependencies(sources):
             pl.concat_str("name", "value", separator=":").alias("combined")
         )
     )
-    assert set(result["combined"]) == {
+    assert _entries(result["combined"]) == {
         _source(sources["left_rid"], "name"),
         _source(sources["left_rid"], "value"),
     }
@@ -862,7 +875,7 @@ def test_groupby_tracks_derived_key_and_aggregate_inputs(sources):
         .agg((pl.col("value") + pl.col("other")).sum().alias("total"))
     )
     assert result["bucket"] == [_source(sources["left_rid"], "id")]
-    assert set(result["total"]) == {
+    assert _entries(result["total"]) == {
         _source(sources["left_rid"], "value"),
         _source(sources["left_rid"], "other"),
     }
@@ -899,7 +912,7 @@ def test_full_coalesced_join_key_has_both_sources(sources):
     result = _trace(
         sources["left"].join(sources["right"], on="id", how="full", coalesce=True)
     )
-    assert set(result["id"]) == {
+    assert _entries(result["id"]) == {
         _source(sources["left_rid"], "id"),
         _source(sources["right_rid"], "id"),
     }
@@ -938,7 +951,7 @@ def test_join_with_different_key_names_tracks_physical_keys(sources):
             coalesce=True,
         )
     )
-    assert set(result["value"]) == {
+    assert _entries(result["value"]) == {
         _source(sources["left_rid"], "value"),
         _source(sources["right_rid"], "score"),
     }
@@ -964,7 +977,7 @@ def test_vertical_union_combines_sources_by_output_position(tmp_path: Path):
     result = _trace(
         pl.concat([pl.scan_parquet(path_a), pl.scan_parquet(path_b)], how="vertical")
     )
-    assert set(result["name"]) == {
+    assert _entries(result["name"]) == {
         _source(rid_a, "name"),
         _source(rid_b, "name"),
     }
@@ -982,7 +995,7 @@ def test_diagonal_union_does_not_invent_missing_column_sources(tmp_path: Path):
     )
     assert result["left"] == [_source(rid_a, "left")]
     assert result["right"] == [_source(rid_b, "right")]
-    assert set(result["id"]) == {_source(rid_a, "id"), _source(rid_b, "id")}
+    assert _entries(result["id"]) == {_source(rid_a, "id"), _source(rid_b, "id")}
 
 
 def test_horizontal_concat_preserves_distinct_inputs(tmp_path: Path):
@@ -1010,7 +1023,7 @@ def test_merge_sorted_combines_each_physical_column_source(tmp_path: Path):
     result = _trace(
         pl.scan_parquet(path_a).merge_sorted(pl.scan_parquet(path_b), key="id")
     )
-    assert set(result["value"]) == {
+    assert _entries(result["value"]) == {
         _source(rid_a, "value"),
         _source(rid_b, "value"),
     }
@@ -1128,8 +1141,8 @@ def test_union_preserves_computed_struct_field_lineage(tmp_path: Path):
 
     result = _trace(pl.concat(records).unnest("person"))
 
-    assert set(result["first"]) == {_source(rid_a, "first"), _source(rid_b, "first")}
-    assert set(result["age"]) == {_source(rid_a, "age"), _source(rid_b, "age")}
+    assert _entries(result["first"]) == {_source(rid_a, "first"), _source(rid_b, "first")}
+    assert _entries(result["age"]) == {_source(rid_a, "age"), _source(rid_b, "age")}
 
 
 def test_struct_field_expression_recovers_individual_field(sources):
@@ -1151,7 +1164,7 @@ def test_unpivot_value_unions_only_value_columns(sources):
         )
     )
     assert result["id"] == [_source(sources["left_rid"], "id")]
-    assert set(result["metric_value"]) == {
+    assert _entries(result["metric_value"]) == {
         _source(sources["left_rid"], "value"),
         _source(sources["left_rid"], "other"),
     }
@@ -1169,7 +1182,7 @@ def test_unpivot_uses_default_output_names(sources):
         .unpivot(index=["id"], on=["amount", "quantity"])
     )
     assert result["id"] == [_source(sources["left_rid"], "id")]
-    assert set(result["value"]) == {
+    assert _entries(result["value"]) == {
         _source(sources["left_rid"], "value"),
         _source(sources["left_rid"], "other"),
     }
@@ -1184,17 +1197,17 @@ def test_plan_analysis_is_memoized_with_isolated_results(monkeypatch):
     def analyze_node(_tracer, node_id):
         analyzed_nodes.append(node_id)
         return _PlanState(
-            {"value": _ColumnLineage({"source.parquet|value"})}
+            {"value": _ColumnLineage({("source.parquet", "value")})}
         )
 
     monkeypatch.setattr(InputSourceTracer, "_analyze_node", analyze_node)
 
     first = tracer._analyze(7)
-    first.columns["value"].sources.add("caller-mutation")
+    first.columns["value"].sources.add(("caller", "mutation"))
     second = tracer._analyze(7)
 
     assert analyzed_nodes == [7]
-    assert second.columns["value"].sources == {"source.parquet|value"}
+    assert second.columns["value"].sources == {("source.parquet", "value")}
 
 
 def test_asof_join_tracks_each_side_without_name_guessing(sources):
@@ -1329,7 +1342,9 @@ def test_non_lazyframe_is_rejected():
         InputSourceTracer("not a LazyFrame")  # type: ignore[arg-type]
 
 
-def test_source_ids_split_on_last_separator():
+def test_sources_keep_separator_characters_in_paths_and_names():
     tracer = InputSourceTracer.__new__(InputSourceTracer)
-    tracer.column_sources = {"out": {"/tmp/a|b.parquet|source"}}
-    assert tracer.get_column_sources() == {"out": ["/tmp/a|b.parquet|source"]}
+    tracer.column_sources = {"out": {("/tmp/a|b.parquet", "so|urce")}}
+    assert tracer.get_column_sources() == {
+        "out": [{"dataset_rid": "/tmp/a|b.parquet", "column": "so|urce"}]
+    }

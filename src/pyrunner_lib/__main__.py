@@ -1,5 +1,16 @@
 import sys
-from .pyrunner_lib import transform, PyrunnerError, ConfigurationError, TransformNotFoundError, ModuleLoadError, DataLoadError, DataWriteError
+
+from .health_check import HealthCheckFailure
+from .pyrunner_lib import (
+    ConfigurationError,
+    DataLoadError,
+    DataWriteError,
+    ModuleLoadError,
+    PyrunnerError,
+    TransformNotFoundError,
+    transform,
+)
+
 
 def main():
     """Main entry point for the pyrunner CLI."""
@@ -30,8 +41,9 @@ def main():
     except PyrunnerError as e:
         print(f"Pyrunner Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except Exception as e:
-        print(f"Unexpected Error: {e}", file=sys.stderr)
+    # The report says which checks failed; a traceback would add nothing
+    except HealthCheckFailure as e:
+        print(f"Health Check Failure: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

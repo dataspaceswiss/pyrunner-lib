@@ -3,10 +3,28 @@
 import json
 import os
 import tempfile
-import pytest
-import polars as pl
 
-from pyrunner_lib.health_check import Check, HealthCheckFailure, run_health_checks
+import polars as pl
+import pytest
+
+from pyrunner_lib.health_check import (
+    VIOLATION_SAMPLE,
+    Check,
+    HealthCheckFailure,
+    run_health_checks,
+)
+
+
+def written(frame, directory):
+    """Write a transform output the way the runner does and return its path."""
+    path = os.path.join(directory, "data.parquet")
+    if isinstance(frame, pl.LazyFrame):
+        frame.sink_parquet(path)
+    elif isinstance(frame, pl.DataFrame):
+        frame.write_parquet(path)
+    else:
+        frame.to_parquet(path, index=False)
+    return path
 
 
 class TestCheck:
@@ -29,7 +47,7 @@ class TestCheck:
     def test_check_chaining(self):
         """Test that checks can be chained."""
         check = Check("col1").no_nulls().unique().valid_range(min_val=0)
-        col, checks = check.build()
+        _col, checks = check.build()
         assert len(checks) == 3
         assert checks[0][0] == "no_nulls"
         assert checks[1][0] == "unique"
@@ -44,7 +62,7 @@ class TestNoNulls:
         df = pl.LazyFrame({"col": [1, 2, 3]})
         check = Check("col").no_nulls()
         _, checks = check.build()
-        name, severity, condition = checks[0]
+        _name, _severity, condition, _ = checks[0]
         
         # Should not raise
         condition(df, "col")
@@ -54,7 +72,7 @@ class TestNoNulls:
         df = pl.LazyFrame({"col": [1, None, 3]})
         check = Check("col").no_nulls()
         _, checks = check.build()
-        name, severity, condition = checks[0]
+        _name, _severity, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="null values found"):
             condition(df, "col")
@@ -80,7 +98,7 @@ class TestNonEmptyStrings:
         df = pl.LazyFrame({"col": ["a", "b", "c"]})
         check = Check("col").non_empty_strings()
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -89,7 +107,7 @@ class TestNonEmptyStrings:
         df = pl.LazyFrame({"col": ["a", "", "c"]})
         check = Check("col").non_empty_strings()
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="empty strings found"):
             condition(df, "col")
@@ -99,7 +117,7 @@ class TestNonEmptyStrings:
         df = pl.LazyFrame({"col": ["a", "   ", "c"]})
         check = Check("col").non_empty_strings()
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="empty strings found"):
             condition(df, "col")
@@ -113,7 +131,7 @@ class TestUnique:
         df = pl.LazyFrame({"col": [1, 2, 3]})
         check = Check("col").unique()
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -122,7 +140,7 @@ class TestUnique:
         df = pl.LazyFrame({"col": [1, 2, 2, 3]})
         check = Check("col").unique()
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="Duplicate values found"):
             condition(df, "col")
@@ -136,7 +154,7 @@ class TestValidRange:
         df = pl.LazyFrame({"col": [1, 5, 10]})
         check = Check("col").valid_range(min_val=0, max_val=10)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -145,7 +163,7 @@ class TestValidRange:
         df = pl.LazyFrame({"col": [-1, 5, 10]})
         check = Check("col").valid_range(min_val=0, max_val=10)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="values out of range"):
             condition(df, "col")
@@ -155,7 +173,7 @@ class TestValidRange:
         df = pl.LazyFrame({"col": [1, 5, 100]})
         check = Check("col").valid_range(min_val=0, max_val=10)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="values out of range"):
             condition(df, "col")
@@ -165,7 +183,7 @@ class TestValidRange:
         df = pl.LazyFrame({"col": [1, 5, 100]})
         check = Check("col").valid_range(min_val=0)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -174,7 +192,7 @@ class TestValidRange:
         df = pl.LazyFrame({"col": [-100, 5, 10]})
         check = Check("col").valid_range(max_val=10)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
 
@@ -187,7 +205,7 @@ class TestInValues:
         df = pl.LazyFrame({"col": ["A", "B", "C"]})
         check = Check("col").in_values(["A", "B", "C", "D"])
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -196,7 +214,7 @@ class TestInValues:
         df = pl.LazyFrame({"col": ["A", "B", "X"]})
         check = Check("col").in_values(["A", "B", "C"])
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="invalid values"):
             condition(df, "col")
@@ -206,7 +224,7 @@ class TestInValues:
         df = pl.LazyFrame({"col": ["a", "B", "c"]})
         check = Check("col").in_values(["A", "B", "C"], ignore_case=True)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
 
@@ -219,7 +237,7 @@ class TestRegexMatch:
         df = pl.LazyFrame({"col": ["abc123", "def456", "ghi789"]})
         check = Check("col").regex_match(r"[a-z]+[0-9]+")
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -228,7 +246,7 @@ class TestRegexMatch:
         df = pl.LazyFrame({"col": ["abc123", "!!!", "ghi789"]})
         check = Check("col").regex_match(r"^[a-z]+[0-9]+$")
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="do not match regex"):
             condition(df, "col")
@@ -238,7 +256,7 @@ class TestRegexMatch:
         df = pl.LazyFrame({"col": [1, 2, 3]})
         check = Check("col").regex_match(r"^[0-9]+$")
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         # Polars raises InvalidOperationError for type mismatch during lazy eval
         with pytest.raises(pl.exceptions.InvalidOperationError):
@@ -253,7 +271,7 @@ class TestNullPercentage:
         df = pl.LazyFrame({"col": [1, None, 3, 4, 5]})  # 20% nulls
         check = Check("col").null_percentage(max_pct=25.0)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -262,7 +280,7 @@ class TestNullPercentage:
         df = pl.LazyFrame({"col": [1, None, 3, 4, 5]})  # 20% nulls
         check = Check("col").null_percentage(max_pct=10.0)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="nulls in"):
             condition(df, "col")
@@ -272,7 +290,7 @@ class TestNullPercentage:
         df = pl.LazyFrame({"col": [1, 2, 3]})  # 0% nulls
         check = Check("col").null_percentage(max_pct=0.0)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
 
@@ -285,7 +303,7 @@ class TestNumericCheck:
         df = pl.LazyFrame({"col": [10, 20, 30]})
         check = Check("col").numeric_check(gt=5)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -294,7 +312,7 @@ class TestNumericCheck:
         df = pl.LazyFrame({"col": [1, 20, 30]})
         check = Check("col").numeric_check(gt=5)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="values failed numeric check"):
             condition(df, "col")
@@ -304,7 +322,7 @@ class TestNumericCheck:
         df = pl.LazyFrame({"col": [10, 20, 30]})
         check = Check("col").numeric_check(sum_eq=60)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -313,7 +331,7 @@ class TestNumericCheck:
         df = pl.LazyFrame({"col": [10, 20, 30]})
         check = Check("col").numeric_check(sum_eq=100)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="Sum of"):
             condition(df, "col")
@@ -323,7 +341,7 @@ class TestNumericCheck:
         df = pl.LazyFrame({"col": ["a", "b", "c"]})
         check = Check("col").numeric_check(gt=0)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         # Polars raises ComputeError for type mismatch during lazy eval
         with pytest.raises(pl.exceptions.ComputeError):
@@ -338,7 +356,7 @@ class TestDistinctCount:
         df = pl.LazyFrame({"col": ["A", "B", "C", "A"]})
         check = Check("col").distinct_count(expected_count=3)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         condition(df, "col")
     
@@ -347,7 +365,7 @@ class TestDistinctCount:
         df = pl.LazyFrame({"col": ["A", "B", "C"]})
         check = Check("col").distinct_count(expected_count=5)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="distinct values"):
             condition(df, "col")
@@ -367,7 +385,7 @@ class TestCustomCheck:
         df = pl.LazyFrame({"col": [50, 60, 70]})
         check = Check("col").custom_check("sum_check", "fail", my_check)
         _, checks = check.build()
-        name, severity, condition = checks[0]
+        name, severity, condition, _ = checks[0]
         
         assert name == "sum_check"
         assert severity == "fail"
@@ -384,7 +402,7 @@ class TestCustomCheck:
         df = pl.LazyFrame({"col": [10, 20, 30]})
         check = Check("col").custom_check("sum_check", "warn", my_check)
         _, checks = check.build()
-        _, _, condition = checks[0]
+        _, _, condition, _ = checks[0]
         
         with pytest.raises(ValueError, match="Sum too low"):
             condition(df, "col")
@@ -408,7 +426,7 @@ class TestRunHealthChecks:
                 Check("name").no_nulls()
             ]
             
-            report = run_health_checks(lf, checks)
+            report = run_health_checks(written(lf, temp_dir), checks)
             
             # Check report structure
             assert "timestamp" in report
@@ -440,7 +458,7 @@ class TestRunHealthChecks:
             ]
             
             # Should not raise even though check fails
-            report = run_health_checks(lf, checks)
+            report = run_health_checks(written(lf, temp_dir), checks)
             
             assert report["summary"]["failed"] == 1
             assert report["columns"]["id"]["checks"][0]["passed"] is False
@@ -459,7 +477,7 @@ class TestRunHealthChecks:
             ]
             
             with pytest.raises(HealthCheckFailure, match="fail'-severity checks failed"):
-                run_health_checks(lf, checks)
+                run_health_checks(written(lf, temp_dir), checks)
     
     def test_run_health_checks_mixed_results(self):
         """Test run_health_checks with some passing and some failing."""
@@ -476,7 +494,7 @@ class TestRunHealthChecks:
                 Check("value").no_nulls(severity="warn")  # Fails
             ]
             
-            report = run_health_checks(lf, checks)
+            report = run_health_checks(written(lf, temp_dir), checks)
             
             # Both checks run, one passes, one fails
             assert report["summary"]["total_checks"] == 2
@@ -494,7 +512,7 @@ class TestRunHealthChecks:
                 Check("col").no_nulls().valid_range(min_val=0, max_val=10)
             ]
             
-            report = run_health_checks(lf, checks)
+            report = run_health_checks(written(lf, temp_dir), checks)
             
             # Check column report structure
             col_report = report["columns"]["col"]
@@ -517,8 +535,7 @@ class TestRunHealthChecks:
             os.environ["META_FOLDER"] = temp_dir
             lf = pl.LazyFrame({"id": [1, 2, 3]})
 
-            report = run_health_checks(
-                lf,
+            report = run_health_checks(written(lf, temp_dir),
                 [Check("id").no_nulls(), Check("id").unique()],
             )
 
@@ -533,7 +550,7 @@ class TestRunHealthChecks:
         with tempfile.TemporaryDirectory() as temp_dir:
             os.environ["META_FOLDER"] = temp_dir
 
-            report = run_health_checks(pl.LazyFrame({"id": [1]}), [Check("id")])
+            report = run_health_checks(written(pl.LazyFrame({"id": [1]}), temp_dir), [Check("id")])
 
             assert report["summary"]["total_columns"] == 0
             assert report["summary"]["total_checks"] == 0
@@ -552,7 +569,7 @@ class TestPandasDataFrame:
                 Check("a").numeric_check(gt=0),
                 Check("b").non_empty_strings()
             ]
-            report = run_health_checks(df, builders)
+            report = run_health_checks(written(df, temp_dir), builders)
             assert report["summary"]["passed"] == 2
             assert report["summary"]["failed"] == 0
 
@@ -567,6 +584,65 @@ class TestPolarsDataFrame:
                 Check("a").numeric_check(gt=0),
                 Check("b").non_empty_strings()
             ]
-            report = run_health_checks(df, builders)
+            report = run_health_checks(written(df, temp_dir), builders)
             assert report["summary"]["passed"] == 2
             assert report["summary"]["failed"] == 0
+
+
+class TestViolations:
+    """Row positions of violating rows point into the written file."""
+
+    def test_reports_positions_of_violating_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            path = written(pl.DataFrame({"id": [1, None, 3, None], "v": [5, 50, 7, 70]}), temp_dir)
+
+            report = run_health_checks(
+                path, [Check("id").no_nulls(), Check("v").valid_range(max_val=10)]
+            )
+
+            ids = report["columns"]["id"]["checks"][0]
+            values = report["columns"]["v"]["checks"][0]
+            assert (ids["id"], ids["rows"]) == (0, [1, 3])
+            assert (values["id"], values["rows"]) == (1, [1, 3])
+            with open(os.path.join(temp_dir, "health_report.json")) as f:
+                assert json.load(f)["columns"]["id"]["checks"][0]["rows"] == [1, 3]
+
+    def test_reports_at_most_the_sample_size(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            path = written(pl.DataFrame({"id": [None] * (VIOLATION_SAMPLE + 50)}, schema={"id": pl.Int64}), temp_dir)
+
+            report = run_health_checks(path, [Check("id").no_nulls()])
+
+            check = report["columns"]["id"]["checks"][0]
+            assert check["rows"] == list(range(VIOLATION_SAMPLE))
+            assert f"{VIOLATION_SAMPLE + 50} null values" in check["error"]
+
+    def test_column_level_and_passing_checks_report_no_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            path = written(pl.DataFrame({"a": [1, 2]}), temp_dir)
+
+            report = run_health_checks(
+                path, [Check("a").numeric_check(sum_eq=0).no_nulls()]
+            )
+
+            assert [c["rows"] for c in report["columns"]["a"]["checks"]] == [[], []]
+
+    def test_custom_check_violations(self):
+        def even(lf, c):
+            odd = lf.select((pl.col(c) % 2 == 1).sum()).collect().item()
+            if odd:
+                raise ValueError(f"{odd} odd values")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["META_FOLDER"] = temp_dir
+            path = written(pl.DataFrame({"a": [2, 3, 4, 5]}), temp_dir)
+
+            report = run_health_checks(
+                path,
+                [Check("a").custom_check("even", "warn", even, lambda c: pl.col(c) % 2 == 1)],
+            )
+
+            assert report["columns"]["a"]["checks"][0]["rows"] == [1, 3]

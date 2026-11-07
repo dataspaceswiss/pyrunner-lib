@@ -2,10 +2,23 @@
 
 import os
 import tempfile
-import pytest
-import polars as pl
+
 import pandas as pd
+import polars as pl
+
 from pyrunner_lib.health_check import Check, run_health_checks
+
+
+def written(frame, directory):
+    """Write a transform output the way the runner does and return its path."""
+    path = os.path.join(directory, "data.parquet")
+    if isinstance(frame, pl.LazyFrame):
+        frame.sink_parquet(path)
+    elif isinstance(frame, pl.DataFrame):
+        frame.write_parquet(path)
+    else:
+        frame.to_parquet(path, index=False)
+    return path
 
 class TestHealthCheckTypes:
     """Test health checks on different DataFrame types."""
@@ -24,7 +37,7 @@ class TestHealthCheckTypes:
             ]
             
             # Should not raise
-            report = run_health_checks(df, checks)
+            report = run_health_checks(written(df, temp_dir), checks)
             
             assert report["summary"]["passed"] == 1
             assert report["summary"]["failed"] == 0
@@ -43,7 +56,7 @@ class TestHealthCheckTypes:
             ]
             
             # Should not raise
-            report = run_health_checks(df, checks)
+            report = run_health_checks(written(df, temp_dir), checks)
             
             assert report["summary"]["passed"] == 1
             assert report["summary"]["failed"] == 0
@@ -62,12 +75,7 @@ class TestHealthCheckTypes:
             ]
             
             # Should not raise
-            report = run_health_checks(lf, checks)
+            report = run_health_checks(written(lf, temp_dir), checks)
             
             assert report["summary"]["passed"] == 1
             assert report["summary"]["failed"] == 0
-
-    def test_unsupported_frame_type(self):
-        """Test that unsupported inputs fail before checks execute."""
-        with pytest.raises(TypeError, match="frame must be"):
-            run_health_checks({"col": [1, 2, 3]}, [Check("col").no_nulls()])

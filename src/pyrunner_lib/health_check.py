@@ -1,8 +1,11 @@
 """
-Health checks for Polars LazyFrame/DataFrame.
+Health checks on a transform's written output.
 
-All checks work lazily - they only collect aggregate statistics,
-not the entire dataframe.
+Checks run on the parquet file after it is written, so each check reads only the
+columns it needs instead of re-running the transform. For a failed check, the
+report lists the positions of the first VIOLATION_SAMPLE violating rows. They point
+into the immutable output file, so the platform can show those rows without
+storing any row data.
 """
 
 from __future__ import annotations
@@ -11,14 +14,17 @@ import json
 import os
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
-from typing import Any, TypeAlias
+from typing import Any
 
-import pandas as pd  # type: ignore[import-untyped]
 import polars as pl
 
-HealthFrame: TypeAlias = pl.LazyFrame | pl.DataFrame | pd.DataFrame
 CheckCondition = Callable[[pl.LazyFrame, str], None]
-CheckDefinition = tuple[str, str, CheckCondition]
+# Marks the rows that break a check; None for checks on a whole column (sums, counts)
+ViolationExpr = Callable[[str], pl.Expr]
+CheckDefinition = tuple[str, str, CheckCondition, ViolationExpr | None]
+
+# Row positions saved per failed check: enough for the distinct violating values, which DataSpace lists up to 1000
+VIOLATION_SAMPLE = 1000
 
 
 class HealthCheckFailure(Exception):
@@ -26,26 +32,15 @@ class HealthCheckFailure(Exception):
 
 
 def run_health_checks(
-    frame: HealthFrame, column_builders: Iterable[Check]
+    dataset_path: str, column_builders: Iterable[Check]
 ) -> dict[str, Any]:
     """
-    Run health checks on a LazyFrame/DataFrame without collecting the entire dataframe.
+    Run health checks on the written output at dataset_path.
 
-    If input is pandas DataFrame, converts to polars LazyFrame.
-    If input is polars DataFrame, converts to polars LazyFrame.
-
-    Each check only collects the specific aggregate statistics it needs.
+    Writes meta/health_report.json, then raises HealthCheckFailure if a
+    fail-severity check failed.
     """
-    if isinstance(frame, pd.DataFrame):
-        lf = pl.from_pandas(frame).lazy()
-    elif isinstance(frame, pl.DataFrame):
-        lf = frame.lazy()
-    elif isinstance(frame, pl.LazyFrame):
-        lf = frame
-    else:
-        raise TypeError(
-            "frame must be a pandas.DataFrame, polars.DataFrame, or polars.LazyFrame"
-        )
+    lf = pl.scan_parquet(dataset_path)
 
     column_checks: dict[str, list[CheckDefinition]] = {}
     for builder in column_builders:
@@ -55,13 +50,15 @@ def run_health_checks(
 
     report_by_col: dict[str, dict[str, Any]] = {}
     overall_failures: list[tuple[str, str, str]] = []
+    check_id = 0
 
     for col, checks in column_checks.items():
         results: list[dict[str, Any]] = []
         passed = 0
 
-        for check_name, severity, condition in checks:
+        for check_name, severity, condition, violation in checks:
             error_message = None
+            rows: list[int] = []
             try:
                 condition(lf, col)
                 ok = True
@@ -72,15 +69,32 @@ def run_health_checks(
                 error_message = str(e)
                 if severity.lower() == "fail":
                     overall_failures.append((col, check_name, error_message))
+                if violation is not None:
+                    try:
+                        rows = (
+                            lf.with_row_index("row")
+                            .filter(violation(col))
+                            .select("row")
+                            .head(VIOLATION_SAMPLE)
+                            .collect()["row"]
+                            .to_list()
+                        )
+                    # The check already failed; a broken violation expression is reported, not raised
+                    except Exception as e:  # noqa: BLE001
+                        error_message += f" (could not list the violating rows: {e})"
 
             results.append(
                 {
+                    "id": check_id,
                     "check": check_name,
                     "severity": severity,
                     "passed": ok,
                     "error": error_message,
+                    # Positions of the first violating rows in the written dataset file
+                    "rows": rows,
                 }
             )
+            check_id += 1
 
             if ok:
                 passed += 1
@@ -143,8 +157,14 @@ class Check:
         self.column = column_name
         self.checks: list[CheckDefinition] = []
 
-    def _add(self, name: str, severity: str | None, func: CheckCondition) -> Check:
-        self.checks.append((name, severity or self.DEFAULT_SEVERITY, func))
+    def _add(
+        self,
+        name: str,
+        severity: str | None,
+        func: CheckCondition,
+        violation: ViolationExpr | None = None,
+    ) -> Check:
+        self.checks.append((name, severity or self.DEFAULT_SEVERITY, func, violation))
         return self
 
     # ---------------- Basic Checks ----------------
@@ -158,7 +178,7 @@ class Check:
             if nulls > 0:
                 raise ValueError(f"{nulls} null values found in column '{c}'")
 
-        return self._add("no_nulls", severity, condition)
+        return self._add("no_nulls", severity, condition, lambda c: pl.col(c).is_null())
 
     def non_empty_strings(self, severity=None):
         """Fail if any string is empty"""
@@ -172,7 +192,12 @@ class Check:
             if empty_count > 0:
                 raise ValueError(f"{empty_count} empty strings found in column '{c}'")
 
-        return self._add("non_empty_strings", severity, condition)
+        return self._add(
+            "non_empty_strings",
+            severity,
+            condition,
+            lambda c: pl.col(c).str.strip_chars().eq(""),
+        )
 
     def unique(self, severity=None):
         """Warn if there are duplicates"""
@@ -189,14 +214,15 @@ class Check:
                     f"Duplicate values found in column '{c}' ({total - unique_count} duplicates)"
                 )
 
-        return self._add("unique", severity, condition)
+        return self._add(
+            "unique", severity, condition, lambda c: pl.col(c).is_duplicated()
+        )
 
     # ---------------- Range / Value Checks ----------------
     def valid_range(self, min_val=None, max_val=None, severity=None):
         """Check all values are within the specified range"""
 
-        def condition(lf, c):
-            # Build condition for out of range
+        def out_of_range_rows(c):
             checks = []
             if min_val is not None:
                 checks.append(pl.col(c) < min_val)
@@ -204,38 +230,49 @@ class Check:
                 checks.append(pl.col(c) > max_val)
 
             if not checks:
-                return  # No constraints
+                return None  # No constraints
 
             out_of_range_expr = checks[0]
             for check in checks[1:]:
                 out_of_range_expr = out_of_range_expr | check
+            return out_of_range_expr
+
+        def condition(lf, c):
+            out_of_range_expr = out_of_range_rows(c)
+            if out_of_range_expr is None:
+                return
 
             result = lf.select(out_of_range_expr.sum().alias("out_of_range")).collect()
             out_of_range = result["out_of_range"][0]
             if out_of_range > 0:
                 raise ValueError(f"{out_of_range} values out of range in '{c}'")
 
-        return self._add("valid_range", severity, condition)
+        return self._add(
+            "valid_range",
+            severity,
+            condition,
+            out_of_range_rows if min_val is not None or max_val is not None else None,
+        )
 
     def in_values(self, allowed, severity=None, ignore_case=False):
         """Check all values are in the allowed set"""
         allowed_set = set(allowed)
 
-        def condition(lf, c):
+        def invalid_rows(c):
             if ignore_case:
                 allowed_lower = [a.lower() for a in allowed_set]
-                invalid_expr = ~pl.col(c).str.to_lowercase().is_in(allowed_lower)
-            else:
-                invalid_expr = ~pl.col(c).is_in(list(allowed_set))
+                return ~pl.col(c).str.to_lowercase().is_in(allowed_lower)
+            return ~pl.col(c).is_in(list(allowed_set))
 
-            result = lf.select(invalid_expr.sum().alias("invalid")).collect()
+        def condition(lf, c):
+            result = lf.select(invalid_rows(c).sum().alias("invalid")).collect()
             invalid = result["invalid"][0]
             if invalid > 0:
                 raise ValueError(
                     f"{invalid} invalid values in '{c}' (allowed={list(allowed_set)})"
                 )
 
-        return self._add("in_values", severity, condition)
+        return self._add("in_values", severity, condition, invalid_rows)
 
     def regex_match(self, pattern, severity=None):
         """All string values must match the regex"""
@@ -251,7 +288,12 @@ class Check:
                     f"{invalid_count} values in '{c}' do not match regex '{pattern}'"
                 )
 
-        return self._add("regex_match", severity, condition)
+        return self._add(
+            "regex_match",
+            severity,
+            condition,
+            lambda c: ~pl.col(c).str.contains(pattern),
+        )
 
     def null_percentage(self, max_pct=0.0, severity=None):
         """Allow up to max_pct (0-100) nulls"""
@@ -266,7 +308,9 @@ class Check:
             if pct > max_pct:
                 raise ValueError(f"{pct:.2f}% nulls in '{c}', exceeds {max_pct}%")
 
-        return self._add("null_percentage", severity, condition)
+        return self._add(
+            "null_percentage", severity, condition, lambda c: pl.col(c).is_null()
+        )
 
     # ---------------- Numeric Checks ----------------
     def numeric_check(
@@ -282,8 +326,7 @@ class Check:
     ):
         """Checks for numeric columns"""
 
-        def condition(lf, c):
-            # Build failing condition
+        def failing(c):
             failing_conditions = []
             if eq is not None:
                 failing_conditions.append(pl.col(c) != eq)
@@ -297,14 +340,24 @@ class Check:
                 failing_conditions.append(pl.col(c) > lte)
             if not_eq is not None:
                 failing_conditions.append(pl.col(c) == not_eq)
+            if not failing_conditions:
+                return None
 
+            combined = failing_conditions[0]
+            for cond in failing_conditions[1:]:
+                combined = combined | cond
+            return combined
+
+        has_row_conditions = any(
+            v is not None for v in (eq, gt, gte, lt, lte, not_eq)
+        )
+
+        def condition(lf, c):
             # Collect only what we need
             exprs = []
-            if failing_conditions:
-                combined = failing_conditions[0]
-                for cond in failing_conditions[1:]:
-                    combined = combined | cond
-                exprs.append(combined.sum().alias("failing_count"))
+            failing_conditions = failing(c)
+            if failing_conditions is not None:
+                exprs.append(failing_conditions.sum().alias("failing_count"))
 
             if sum_eq is not None:
                 exprs.append(pl.col(c).sum().alias("total_sum"))
@@ -314,7 +367,7 @@ class Check:
 
             result = lf.select(exprs).collect()
 
-            if failing_conditions:
+            if failing_conditions is not None:
                 failing_count = result["failing_count"][0]
                 if failing_count > 0:
                     raise ValueError(
@@ -326,7 +379,9 @@ class Check:
                 if total_sum != sum_eq:
                     raise ValueError(f"Sum of '{c}' is {total_sum}, expected {sum_eq}")
 
-        return self._add("numeric_check", severity, condition)
+        return self._add(
+            "numeric_check", severity, condition, failing if has_row_conditions else None
+        )
 
     # ---------------- Aggregate / Count ----------------
     def distinct_count(self, expected_count, severity=None):
@@ -344,10 +399,19 @@ class Check:
 
     # ---------------- Custom ----------------
     def custom_check(
-        self, name: str, severity: str | None, func: CheckCondition
+        self,
+        name: str,
+        severity: str | None,
+        func: CheckCondition,
+        violations: ViolationExpr | None = None,
     ) -> Check:
-        """func(lf, col) should raise ValueError(message) if it fails"""
-        return self._add(name, severity, func)
+        """
+        func(lf, col) should raise ValueError(message) if it fails.
+
+        violations(col) optionally returns an expression that is true for the rows
+        that break the check, so the platform can show them.
+        """
+        return self._add(name, severity, func, violations)
 
     def build(self) -> tuple[str, list[CheckDefinition]]:
         return self.column, self.checks

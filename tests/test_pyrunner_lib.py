@@ -1,33 +1,30 @@
 """Tests for pyrunner_lib module."""
 
 import json
-import tempfile
 import os
+import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
-import polars as pl
+from unittest.mock import MagicMock, patch
+
 import pandas as pd
+import polars as pl
+import pytest
 
 from pyrunner_lib.pyrunner_lib import (
     Config,
-    Connection,
-    load_json,
-    load_configuration,
-    write_column_trace_file,
-    write_df_to_parquet,
-    path_to_name,
-    load_module,
-    read_parquet_files,
-    transform,
-    load_ds_meta,
-    DS_META_DATA,
-    PyrunnerError,
     ConfigurationError,
-    TransformNotFoundError,
-    ModuleLoadError,
+    Connection,
     DataLoadError,
     DataWriteError,
+    ModuleLoadError,
+    TransformNotFoundError,
+    load_json,
+    load_module,
+    path_to_name,
+    read_parquet_files,
+    transform,
+    write_column_trace_file,
+    write_df_to_parquet,
 )
 
 
@@ -261,14 +258,13 @@ class TestReadParquetFiles:
             )
             connections = {"input1": conn}
             
-            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
-                with patch('pyrunner_lib.pyrunner_lib.pl.scan_parquet') as mock_scan:
-                    mock_scan.return_value = pl.LazyFrame({"a": [1, 2, 3]})
+            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), patch('pyrunner_lib.pyrunner_lib.pl.scan_parquet') as mock_scan:
+                mock_scan.return_value = pl.LazyFrame({"a": [1, 2, 3]})
                     
-                    result = read_parquet_files(connections, ["input1"], temp_dir)
+                result = read_parquet_files(connections, ["input1"], temp_dir)
                     
-                    assert "input1" in result
-                    mock_scan.assert_called_once()
+                assert "input1" in result
+                mock_scan.assert_called_once()
     
     def test_read_parquet_files_pandas(self):
         """Test reading parquet files with Pandas."""
@@ -286,22 +282,20 @@ class TestReadParquetFiles:
             )
             connections = {"input1": conn}
             
-            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'):
-                with patch('pyrunner_lib.pyrunner_lib.pd.read_parquet') as mock_read:
-                    mock_read.return_value = pd.DataFrame({"a": [1, 2, 3]})
+            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch('pyrunner_lib.pyrunner_lib.pd.read_parquet') as mock_read:
+                mock_read.return_value = pd.DataFrame({"a": [1, 2, 3]})
                     
-                    result = read_parquet_files(connections, ["input1"], temp_dir)
+                result = read_parquet_files(connections, ["input1"], temp_dir)
                     
-                    assert "input1" in result
-                    mock_read.assert_called_once()
+                assert "input1" in result
+                mock_read.assert_called_once()
     
     def test_read_parquet_files_missing_connection(self):
         """Test reading parquet files with missing connection."""
         connections = {}
         
-        with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
-            with pytest.raises(DataLoadError, match="Input parameter 'missing' not found"):
-                read_parquet_files(connections, ["missing"], "/tmp")
+        with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), pytest.raises(DataLoadError, match="Input parameter 'missing' not found"):
+            read_parquet_files(connections, ["missing"], "/tmp")
 
     def test_read_parquet_files_draft_build_limit(self):
         """Test that read_parquet_files limits rows to 1,000,000 when IS_DRAFT_BUILD is true."""
@@ -318,39 +312,32 @@ class TestReadParquetFiles:
             connections = {"input1": conn}
             
             # Case 1: IS_DRAFT_BUILD is "true", limit to 2 rows for test
-            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}):
-                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
-                    # We need to mock the 1,000_000 to something smaller for the test 
-                    # OR just verify that .head() was called.
-                    # Actually, the implementation uses a hardcoded 1_000_000.
-                    # To test it properly with a smaller dataset, we can check if it returns all rows if < 1M.
-                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)
-                    df_result = result["input1"].collect()
-                    assert len(df_result) == 10
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
+                # We need to mock the 1,000_000 to something smaller for the test 
+                # OR just verify that .head() was called.
+                # Actually, the implementation uses a hardcoded 1_000_000.
+                # To test it properly with a smaller dataset, we can check if it returns all rows if < 1M.
+                result = read_parquet_files(connections, {"input1": rid}, temp_dir)
+                df_result = result["input1"].collect()
+                assert len(df_result) == 10
             
             # Case 2: Verify it limits if we had more than 1M rows (mocking .head)
-            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}):
-                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
-                    with patch('polars.LazyFrame.head') as mock_head:
-                        mock_head.return_value = pl.LazyFrame({"a": [1]})
-                        read_parquet_files(connections, {"input1": rid}, temp_dir)
-                        mock_head.assert_called_once_with(1_000_000)
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), patch('polars.LazyFrame.head') as mock_head:
+                mock_head.return_value = pl.LazyFrame({"a": [1]})
+                read_parquet_files(connections, {"input1": rid}, temp_dir)
+                mock_head.assert_called_once_with(1_000_000)
 
             # Case 3: Verify it does NOT limit if IS_DRAFT_BUILD is not set
-            with patch.dict(os.environ, {}, clear=True):
-                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
-                    with patch('polars.LazyFrame.head') as mock_head:
-                        read_parquet_files(connections, {"input1": rid}, temp_dir)
-                        mock_head.assert_not_called()
+            with patch.dict(os.environ, {}, clear=True), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), patch('polars.LazyFrame.head') as mock_head:
+                read_parquet_files(connections, {"input1": rid}, temp_dir)
+                mock_head.assert_not_called()
 
             # Case 4: Verify Pandas limit
-            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}):
-                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'):
-                    with patch('pandas.read_parquet') as mock_read:
-                        mock_df = MagicMock()
-                        mock_read.return_value = mock_df
-                        read_parquet_files(connections, {"input1": rid}, temp_dir)
-                        mock_df.head.assert_called_once_with(1_000_000)
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch('pandas.read_parquet') as mock_read:
+                mock_df = MagicMock()
+                mock_read.return_value = mock_df
+                read_parquet_files(connections, {"input1": rid}, temp_dir)
+                mock_df.head.assert_called_once_with(1_000_000)
 
     def test_read_parquet_files_explicit_rid_fallback(self):
         """Test that explicit RIDs can fall back while others cannot."""
@@ -377,9 +364,8 @@ class TestReadParquetFiles:
     
     def test_read_parquet_files_configuration_not_loaded(self):
         """Test reading parquet files without configuration."""
-        with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', None):
-            with pytest.raises(ConfigurationError, match="Configuration not loaded"):
-                read_parquet_files({}, [], "/tmp")
+        with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', None), pytest.raises(ConfigurationError, match="Configuration not loaded"):
+            read_parquet_files({}, [], "/tmp")
 
 
 class TestTransform:
@@ -415,16 +401,14 @@ def transform(input1):
                     }], f)
             
             # Mock the file paths
-            with patch('pyrunner_lib.pyrunner_lib.CONFIG_FILE', config_file):
-                with patch('pyrunner_lib.pyrunner_lib.CONNECTIONS_FILE', connections_file):
-                    with patch('pyrunner_lib.pyrunner_lib.read_parquet_files') as mock_read:
-                        mock_read.return_value = {"input1": pl.LazyFrame({"a": [1, 2, 3]})}
+            with patch('pyrunner_lib.pyrunner_lib.CONFIG_FILE', config_file), patch('pyrunner_lib.pyrunner_lib.CONNECTIONS_FILE', connections_file), patch('pyrunner_lib.pyrunner_lib.read_parquet_files') as mock_read:
+                mock_read.return_value = {"input1": pl.LazyFrame({"a": [1, 2, 3]})}
                         
-                        with patch('pyrunner_lib.pyrunner_lib.write_df_to_parquet') as mock_write:
-                            transform("test_transform", temp_dir)
+                with patch('pyrunner_lib.pyrunner_lib.write_df_to_parquet') as mock_write:
+                    transform("test_transform", temp_dir)
                             
-                            mock_read.assert_called_once()
-                            mock_write.assert_called_once()
+                    mock_read.assert_called_once()
+                    mock_write.assert_called_once()
     
     def test_transform_not_found(self):
         """Test transform with non-existent transform ID."""
@@ -446,10 +430,8 @@ def transform(input1):
                     "inputs": []
                 }], f)
             
-            with patch('pyrunner_lib.pyrunner_lib.CONFIG_FILE', config_file):
-                with patch('pyrunner_lib.pyrunner_lib.CONNECTIONS_FILE', connections_file):
-                    with pytest.raises(TransformNotFoundError, match="Transform with ID 'test_transform' not found"):
-                        transform("test_transform", temp_dir)
+            with patch('pyrunner_lib.pyrunner_lib.CONFIG_FILE', config_file), patch('pyrunner_lib.pyrunner_lib.CONNECTIONS_FILE', connections_file), pytest.raises(TransformNotFoundError, match="Transform with ID 'test_transform' not found"):
+                transform("test_transform", temp_dir)
     
     def test_transform_module_no_transform_function(self):
         """Test transform with module missing transform function."""
@@ -471,14 +453,12 @@ def transform(input1):
                     "inputs": []
                 }], f)
             
-            with patch('pyrunner_lib.pyrunner_lib.CONFIG_FILE', config_file):
-                with patch('pyrunner_lib.pyrunner_lib.CONNECTIONS_FILE', connections_file):
-                    with patch('pyrunner_lib.pyrunner_lib.load_module') as mock_load:
-                        mock_module = MagicMock()
-                        # Remove transform attribute
-                        del mock_module.transform
-                        mock_load.return_value = mock_module
+            with patch('pyrunner_lib.pyrunner_lib.CONFIG_FILE', config_file), patch('pyrunner_lib.pyrunner_lib.CONNECTIONS_FILE', connections_file), patch('pyrunner_lib.pyrunner_lib.load_module') as mock_load:
+                mock_module = MagicMock()
+                # Remove transform attribute
+                del mock_module.transform
+                mock_load.return_value = mock_module
                         
-                        with pytest.raises(ModuleLoadError, match="does not contain a 'transform' function"):
-                            transform("test_transform", temp_dir)
+                with pytest.raises(ModuleLoadError, match="does not contain a 'transform' function"):
+                    transform("test_transform", temp_dir)
 

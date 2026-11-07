@@ -1,11 +1,11 @@
 """Shared test fixtures and configuration."""
 
-import json
-import tempfile
 import os
-import pytest
-import polars as pl
+import tempfile
+
 import pandas as pd
+import polars as pl
+import pytest
 
 
 @pytest.fixture
