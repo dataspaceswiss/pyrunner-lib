@@ -1,5 +1,6 @@
 import sys
 
+from .health_check import HealthCheckFailure
 from .pyrunner_lib import (
     ConfigurationError,
     DataLoadError,
@@ -39,6 +40,10 @@ def main():
         sys.exit(1)
     except PyrunnerError as e:
         print(f"Pyrunner Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    # The report says which checks failed; a traceback would add nothing
+    except HealthCheckFailure as e:
+        print(f"Health Check Failure: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

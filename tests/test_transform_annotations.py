@@ -234,8 +234,17 @@ def transform(input2):
                 ),
                 "input_df",
             ),
+            (
+                (
+                    "from __future__ import annotations\nfrom typing import TYPE_CHECKING, Annotated\n"
+                    "from pyrunner_lib import Transform\n"
+                    "if TYPE_CHECKING:\n    import polars as pl\n"
+                    "def transform(input_df: Annotated[pl.LazyFrame, Transform('rid-xxx')]):\n    return input_df\n"
+                ),
+                "rid-xxx",
+            ),
         ],
-        ids=["postponed", "annotated", "type-checking-only"],
+        ids=["postponed", "annotated", "type-checking-only", "postponed-annotated-type-checking-only"],
     )
     def test_annotation_forms(self, mock_env, source, expected):
         transform_file = mock_env / "forms.py"
@@ -249,3 +258,13 @@ def transform(input2):
                 transform("forms", base_path=str(mock_env))
 
         assert mock_read.call_args[0][1]["input_df"] == expected
+
+    def test_error_in_the_transform_is_not_wrapped(self, mock_env):
+        """The user's own error reaches the caller unchanged, so the build log shows its traceback."""
+        transform_file = mock_env / "broken.py"
+        transform_file.write_text("def transform():\n    raise KeyError('missing column')\n")
+        with open(mock_env / "_connections.json", 'w') as f:
+            json.dump([{"id": "broken", "path": str(transform_file), "inputs": []}], f)
+
+        with pytest.raises(KeyError, match="missing column"):
+            transform("broken", base_path=str(mock_env))

@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from pyrunner_lib.__main__ import main
+from pyrunner_lib.health_check import HealthCheckFailure
 from pyrunner_lib.pyrunner_lib import (
     ConfigurationError,
     DataLoadError,
@@ -90,3 +91,12 @@ class TestMain:
             mock_transform.side_effect = RuntimeError("Unexpected error")
             with pytest.raises(RuntimeError):
                 main()
+
+    def test_main_health_check_failure(self, capsys):
+        """A failed fail-severity check ends the run with its message, not a traceback."""
+        with patch('sys.argv', ['pyrunner', 'test_transform']), patch('pyrunner_lib.__main__.transform') as mock_transform:
+            mock_transform.side_effect = HealthCheckFailure("One or more 'fail'-severity checks failed")
+            with pytest.raises(SystemExit) as exit_info:
+                main()
+        assert exit_info.value.code == 1
+        assert "Health Check Failure: One or more 'fail'-severity checks failed" in capsys.readouterr().err
