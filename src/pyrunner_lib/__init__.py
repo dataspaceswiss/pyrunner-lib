@@ -1,24 +1,24 @@
+from .__main__ import main
 from .pyrunner_lib import (
-    transform,
-    Transform,
-    PyrunnerError,
     ConfigurationError,
-    TransformNotFoundError,
-    ModuleLoadError,
     DataLoadError,
     DataWriteError,
+    ModuleLoadError,
+    PyrunnerError,
+    Transform,
+    TransformNotFoundError,
+    transform,
 )
-from .__main__ import main
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 __all__ = [
-    "transform",
-    "Transform",
-    "PyrunnerError",
-    "ConfigurationError", 
-    "TransformNotFoundError",
-    "ModuleLoadError",
+    "ConfigurationError",
     "DataLoadError",
     "DataWriteError",
+    "ModuleLoadError",
+    "PyrunnerError",
+    "Transform",
+    "TransformNotFoundError",
     "main",
+    "transform",
 ]

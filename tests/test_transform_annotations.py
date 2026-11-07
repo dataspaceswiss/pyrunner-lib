@@ -1,19 +1,14 @@
 
 import json
-import tempfile
-import os
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
+from unittest.mock import patch
+
 import polars as pl
+import pytest
+
 from pyrunner_lib.pyrunner_lib import (
-    Transform,
     transform,
-    _execute_transform,
-    Config,
-    Connection,
-    PyrunnerError
 )
+
 
 @pytest.fixture
 def mock_env(tmp_path):
@@ -212,3 +207,45 @@ def transform(input2):
                 param_mapping = mock_read.call_args[0][1]
                 assert "input2" in param_mapping
                 assert "input1" not in param_mapping
+
+    # DataSpace reads these annotations from the source, so the runner has to bind them the same way
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            (
+                (
+                    "from __future__ import annotations\nfrom pyrunner_lib import Transform\n"
+                    "def transform(input_df: Transform('rid-xxx')):\n    return input_df\n"
+                ),
+                "rid-xxx",
+            ),
+            (
+                (
+                    "from typing import Annotated\nimport polars as pl\nfrom pyrunner_lib import Transform\n"
+                    "def transform(input_df: Annotated[pl.LazyFrame, Transform('rid-xxx')]):\n    return input_df\n"
+                ),
+                "rid-xxx",
+            ),
+            (
+                (
+                    "from __future__ import annotations\nfrom typing import TYPE_CHECKING\n"
+                    "if TYPE_CHECKING:\n    import polars as pl\n"
+                    "def transform(input_df: pl.LazyFrame):\n    return input_df\n"
+                ),
+                "input_df",
+            ),
+        ],
+        ids=["postponed", "annotated", "type-checking-only"],
+    )
+    def test_annotation_forms(self, mock_env, source, expected):
+        transform_file = mock_env / "forms.py"
+        transform_file.write_text(source)
+        with open(mock_env / "_connections.json", 'w') as f:
+            json.dump([{"id": "forms", "path": str(transform_file), "inputs": []}], f)
+
+        with patch('pyrunner_lib.pyrunner_lib.read_parquet_files') as mock_read:
+            mock_read.return_value = {"input_df": pl.LazyFrame({"a": [1]})}
+            with patch('pyrunner_lib.pyrunner_lib.write_df_to_parquet'):
+                transform("forms", base_path=str(mock_env))
+
+        assert mock_read.call_args[0][1]["input_df"] == expected

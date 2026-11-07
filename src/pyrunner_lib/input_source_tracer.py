@@ -9,10 +9,13 @@ from typing import Any, ClassVar
 
 import polars as pl
 
+# A source column: the parquet file it was read from and its name there
+_Source = tuple[str, str]
+
 
 @dataclass
 class _ColumnLineage:
-    sources: set[str] = field(default_factory=set)
+    sources: set[_Source] = field(default_factory=set)
     fields: dict[str, _ColumnLineage] = field(default_factory=dict)
 
     def clone(self) -> _ColumnLineage:
@@ -53,24 +56,23 @@ class _OpaqueNode:
     expression_names: tuple[str, ...]
 
 
+# Each output column lists the columns it came from as {"dataset_rid", "column"} objects, so no name or path
+# ever needs splitting. dataset_rid is the transform whose dataset was read, or the file path for any other file.
 def _format_column_sources(
-    column_sources: dict[str, set[str]],
-) -> dict[str, list[str]]:
-    results: dict[str, list[str]] = {}
+    column_sources: dict[str, set[_Source]],
+) -> dict[str, list[dict[str, str]]]:
+    results: dict[str, list[dict[str, str]]] = {}
     rid_pattern = re.compile(r"rid\.transform\.[a-f0-9a-zA-Z-]+")
     for column, sources in column_sources.items():
-        formatted: set[str] = set()
-        for source_id in sources:
-            parts = source_id.rsplit("|", 1)
-            if len(parts) == 1:
-                formatted.add(source_id)
-                continue
-            file_path, source_column = parts
+        formatted: set[_Source] = set()
+        for file_path, source_column in sources:
             match = rid_pattern.search(file_path)
-            source_name = match.group(0) if match else file_path
-            formatted.add(f"{source_name}|{source_column}")
+            formatted.add((match.group(0) if match else file_path, source_column))
         if formatted:
-            results[column] = sorted(formatted)
+            results[column] = [
+                {"dataset_rid": dataset_rid, "column": source_column}
+                for dataset_rid, source_column in sorted(formatted)
+            ]
     return results
 
 
@@ -230,7 +232,7 @@ class InputSourceTracer:
             for name in output_names:
                 if name in physical_columns:
                     lineage = columns.setdefault(name, _ColumnLineage())
-                    lineage.sources.add(f"{file_path}|{name}")
+                    lineage.sources.add((file_path, name))
         return self._state(output_names, columns)
 
     def _named_expressions(
@@ -480,10 +482,12 @@ class InputSourceTracer:
                 lineage.merge(self._expression_lineage(child, input_state))
         return lineage
 
-    def get_column_sources(self) -> dict[str, list[str]]:
+    def get_column_sources(self) -> dict[str, list[dict[str, str]]]:
         return _format_column_sources(self.column_sources)
 
 
-def trace_lazyframe_sources(lazyframe: pl.LazyFrame) -> dict[str, list[str]]:
+def trace_lazyframe_sources(
+    lazyframe: pl.LazyFrame,
+) -> dict[str, list[dict[str, str]]]:
     """Trace a live LazyFrame using Polars' optimized, structured query plan."""
     return InputSourceTracer(lazyframe).get_column_sources()

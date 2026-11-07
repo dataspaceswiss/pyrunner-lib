@@ -1,5 +1,15 @@
 import sys
-from .pyrunner_lib import transform, PyrunnerError, ConfigurationError, TransformNotFoundError, ModuleLoadError, DataLoadError, DataWriteError
+
+from .pyrunner_lib import (
+    ConfigurationError,
+    DataLoadError,
+    DataWriteError,
+    ModuleLoadError,
+    PyrunnerError,
+    TransformNotFoundError,
+    transform,
+)
+
 
 def main():
     """Main entry point for the pyrunner CLI."""
@@ -29,9 +39,6 @@ def main():
         sys.exit(1)
     except PyrunnerError as e:
         print(f"Pyrunner Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Unexpected Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

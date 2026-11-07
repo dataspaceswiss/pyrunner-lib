@@ -284,6 +284,25 @@ def transform(*args: Any, **kwargs: Any) -> Any:
 transform._is_pyrunner_runner = True  # type: ignore[attr-defined]
 
 
+def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform | None:
+    """The Transform a parameter annotation names, as DataSpace reads it from the source."""
+    if isinstance(annotation, str):
+        # from __future__ import annotations keeps every annotation as its source text. Evaluating it
+        # runs nothing new: it is the transform module's own code, which has already been loaded
+        try:
+            annotation = eval(annotation, func.__globals__)
+        except NameError:
+            # Names imported only for type checking: not a Transform, so the input is bound by name
+            return None
+    if isinstance(annotation, Transform):
+        return annotation
+    # Annotated[pl.LazyFrame, Transform("rid...")]
+    return next(
+        (meta for meta in getattr(annotation, "__metadata__", ()) if isinstance(meta, Transform)),
+        None,
+    )
+
+
 def _execute_transform(transform_id: str, base_path: str = "") -> None:
     """Internal function to execute the transformation process."""
     try:
@@ -361,8 +380,8 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
                         val  # Assume it's an RID string or legacy name
                     )
             # Check type annotation
-            elif isinstance(param.annotation, Transform):
-                param_mapping[name] = param.annotation.rid
+            elif (annotated := _annotated_transform(param.annotation, main_func)) is not None:
+                param_mapping[name] = annotated.rid
                 explicit_params.add(name)
             else:
                 # Default to parameter name
@@ -387,15 +406,14 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
             result = transform_result
             health_checks = None
 
-        # Execute health check if provided
-        if health_checks and isinstance(
-            result, (pl.LazyFrame, pl.DataFrame, pd.DataFrame)
-        ):
-            run_health_checks(result, health_checks)
-
         # Write output
         output_path = f"{base_path}/data/{transform_conn.id}/datasets/data.parquet"
         write_df_to_parquet(result, output_path, transform_conn.id, base_path)
+
+        # Checks run on the written file: re-running the transform for every check is
+        # slower, and its row order may differ from the file's
+        if health_checks:
+            run_health_checks(output_path, health_checks)
 
         print("--------- Build successful ---------")
         print(f"Execution Time: {time.time() - start_time:.2f} sec")
