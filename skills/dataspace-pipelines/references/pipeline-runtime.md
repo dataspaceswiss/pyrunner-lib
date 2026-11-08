@@ -101,7 +101,7 @@ A formatter or lint configuration in the repository, the project's own conventio
   "dfType": "polars",
   "packages": [
     "plotly",
-    "git+https://github.com/dataspaceswiss/pyrunner-lib@v0.6.0#egg=pyrunner-lib"
+    "git+https://github.com/dataspaceswiss/pyrunner-lib@v0.6.1#egg=pyrunner-lib"
   ]
 }
 ```

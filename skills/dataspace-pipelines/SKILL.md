@@ -9,7 +9,7 @@ Develop DataSpace transforms while preserving pipeline wiring, lineage, persiste
 
 ## Compatibility
 
-This skill describes `pyrunner-lib==0.6.0` running on DataSpace 1.13. A project declares its version as the `pyrunner-lib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
+This skill describes `pyrunner-lib==0.6.1` running on DataSpace 1.13.1. A project declares its version as the `pyrunner-lib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
 
 ## Workflow
 
