@@ -135,6 +135,7 @@ CONFIG: Config | None = None
 CONNECTIONS: list[Connection] | None = None
 DF_TYPE: str | None = None
 DEFAULT_DRAFT_READ_LIMIT = 1_000_000
+NO_DRAFT_READ_LIMIT = -1
 DS_META_DATA: dict[str, dict[str, Any]] | None = None
 
 
@@ -469,16 +470,19 @@ def read_parquet_files(
     conn_by_id = {conn.id: conn for conn in connections.values()}
     conn_by_name = connections  # Already keyed by path stem
 
-    # A draft build reads only the first rows of each input; a workspace can change how many (_config.json draftReadLimit)
+    # A draft build reads only the first rows of each input; a workspace can change how many, or turn the limit off
+    # with -1 (_config.json draftReadLimit)
     draft_read_limit = (
         int(os.environ.get("DRAFT_READ_LIMIT", DEFAULT_DRAFT_READ_LIMIT))
         if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true"
         else None
     )
-    # pandas reads head(-n) as "all but the last n rows", so a non-positive limit must not get that far
-    if draft_read_limit is not None and draft_read_limit < 1:
+    if draft_read_limit == NO_DRAFT_READ_LIMIT:
+        draft_read_limit = None
+    # pandas reads head(-n) as "all but the last n rows", so any other non-positive limit must not get that far
+    elif draft_read_limit is not None and draft_read_limit < 1:
         raise ConfigurationError(
-            f"DRAFT_READ_LIMIT must be a positive number of rows, got {draft_read_limit}."
+            f"DRAFT_READ_LIMIT must be a positive number of rows or {NO_DRAFT_READ_LIMIT} for no limit, got {draft_read_limit}."
         )
 
     for param_name, mapping_key in param_mapping.items():

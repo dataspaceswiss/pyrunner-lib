@@ -323,8 +323,22 @@ class TestReadParquetFiles:
                 result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
                 assert len(result.collect()) == 4
 
+    def test_read_parquet_files_draft_limit_minus_one_reads_everything(self):
+        """-1 turns the draft limit off."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rid = "test-rid"
+            os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
+            pl.DataFrame({"a": range(10)}).write_parquet(os.path.join(temp_dir, "data", rid, "datasets", "data.parquet"))
+            connections = {"input1": Connection(id=rid, path="test.py", inputs=[])}
+            for df_type in ("polars", "pandas"):
+                with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "-1"}), patch(
+                    'pyrunner_lib.pyrunner_lib.DF_TYPE', df_type
+                ), patch('pyrunner_lib.pyrunner_lib.DEFAULT_DRAFT_READ_LIMIT', 3):
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                    assert len(result.collect() if df_type == "polars" else result) == 10
+
     def test_read_parquet_files_draft_limit_must_be_positive(self):
-        """A zero or negative limit is refused; pandas would read head(-n) as all but the last n rows."""
+        """Zero and negatives other than -1 are refused; pandas would read head(-n) as all but the last n rows."""
         connections = {"input1": Connection(id="rid", path="test.py", inputs=[])}
         for limit in ("0", "-2"):
             with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": limit}), patch(
