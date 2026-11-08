@@ -472,11 +472,15 @@ def read_parquet_files(
 
     # A draft build reads only the first rows of each input; a workspace can change how many, or turn the limit off
     # with -1 (_config.json draftReadLimit)
-    draft_read_limit = (
-        int(os.environ.get("DRAFT_READ_LIMIT", DEFAULT_DRAFT_READ_LIMIT))
-        if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true"
-        else None
-    )
+    draft_read_limit = None
+    if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true":
+        raw_limit = os.environ.get("DRAFT_READ_LIMIT", str(DEFAULT_DRAFT_READ_LIMIT))
+        try:
+            draft_read_limit = int(raw_limit)
+        except ValueError as e:
+            raise ConfigurationError(
+                f"DRAFT_READ_LIMIT must be a whole number of rows, got {raw_limit!r}."
+            ) from e
     if draft_read_limit == NO_DRAFT_READ_LIMIT:
         draft_read_limit = None
     # pandas reads head(-n) as "all but the last n rows", so any other non-positive limit must not get that far

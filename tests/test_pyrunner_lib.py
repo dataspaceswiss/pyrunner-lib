@@ -340,7 +340,7 @@ class TestReadParquetFiles:
     def test_read_parquet_files_draft_limit_must_be_positive(self):
         """Zero and negatives other than -1 are refused; pandas would read head(-n) as all but the last n rows."""
         connections = {"input1": Connection(id="rid", path="test.py", inputs=[])}
-        for limit in ("0", "-2"):
+        for limit in ("0", "-2", "abc", ""):
             with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": limit}), patch(
                 'pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'
             ), pytest.raises(ConfigurationError):
