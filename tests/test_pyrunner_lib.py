@@ -298,46 +298,74 @@ class TestReadParquetFiles:
             read_parquet_files(connections, ["missing"], "/tmp")
 
     def test_read_parquet_files_draft_build_limit(self):
-        """Test that read_parquet_files limits rows to 1,000,000 when IS_DRAFT_BUILD is true."""
+        """A draft build cuts each input to DRAFT_READ_LIMIT rows; other builds read everything."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Create test parquet file with some dummy data
-            # Use 5 rows for simplicity in testing the .head() call
-            df = pl.DataFrame({"a": range(10)})
             rid = "test-rid"
             os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
-            parquet_path = os.path.join(temp_dir, "data", rid, "datasets", "data.parquet")
-            df.write_parquet(parquet_path)
-            
-            conn = Connection(id=rid, path="test.py", inputs=[])
-            connections = {"input1": conn}
-            
-            # Case 1: IS_DRAFT_BUILD is "true", limit to 2 rows for test
-            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'):
-                # We need to mock the 1,000_000 to something smaller for the test 
-                # OR just verify that .head() was called.
-                # Actually, the implementation uses a hardcoded 1_000_000.
-                # To test it properly with a smaller dataset, we can check if it returns all rows if < 1M.
-                result = read_parquet_files(connections, {"input1": rid}, temp_dir)
-                df_result = result["input1"].collect()
-                assert len(df_result) == 10
-            
-            # Case 2: Verify it limits if we had more than 1M rows (mocking .head)
-            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), patch('polars.LazyFrame.head') as mock_head:
-                mock_head.return_value = pl.LazyFrame({"a": [1]})
-                read_parquet_files(connections, {"input1": rid}, temp_dir)
-                mock_head.assert_called_once_with(1_000_000)
+            pl.DataFrame({"a": range(10)}).write_parquet(os.path.join(temp_dir, "data", rid, "datasets", "data.parquet"))
+            connections = {"input1": Connection(id=rid, path="test.py", inputs=[])}
+            draft = {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "3"}
 
-            # Case 3: Verify it does NOT limit if IS_DRAFT_BUILD is not set
-            with patch.dict(os.environ, {}, clear=True), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), patch('polars.LazyFrame.head') as mock_head:
-                read_parquet_files(connections, {"input1": rid}, temp_dir)
-                mock_head.assert_not_called()
+            for df_type in ("polars", "pandas"):
+                with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', df_type):
+                    with patch.dict(os.environ, draft):
+                        result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                        assert len(result.collect() if df_type == "polars" else result) == 3
 
-            # Case 4: Verify Pandas limit
-            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}), patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch('pandas.read_parquet') as mock_read:
-                mock_df = MagicMock()
-                mock_read.return_value = mock_df
-                read_parquet_files(connections, {"input1": rid}, temp_dir)
-                mock_df.head.assert_called_once_with(1_000_000)
+                    with patch.dict(os.environ, {}, clear=True):
+                        result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                        assert len(result.collect() if df_type == "polars" else result) == 10
+
+            # Without a configured limit a draft build reads DEFAULT_DRAFT_READ_LIMIT rows
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true"}, clear=True), patch(
+                'pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'
+            ), patch('pyrunner_lib.pyrunner_lib.DEFAULT_DRAFT_READ_LIMIT', 4):
+                result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                assert len(result.collect()) == 4
+
+    def test_read_parquet_files_draft_limit_minus_one_reads_everything(self):
+        """-1 turns the draft limit off."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rid = "test-rid"
+            os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
+            pl.DataFrame({"a": range(10)}).write_parquet(os.path.join(temp_dir, "data", rid, "datasets", "data.parquet"))
+            connections = {"input1": Connection(id=rid, path="test.py", inputs=[])}
+            for df_type in ("polars", "pandas"):
+                with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "-1"}), patch(
+                    'pyrunner_lib.pyrunner_lib.DF_TYPE', df_type
+                ), patch('pyrunner_lib.pyrunner_lib.DEFAULT_DRAFT_READ_LIMIT', 3):
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                    assert len(result.collect() if df_type == "polars" else result) == 10
+
+    def test_read_parquet_files_draft_limit_must_be_positive(self):
+        """Zero and negatives other than -1 are refused; pandas would read head(-n) as all but the last n rows."""
+        connections = {"input1": Connection(id="rid", path="test.py", inputs=[])}
+        for limit in ("0", "-2", "abc", ""):
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": limit}), patch(
+                'pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'
+            ), pytest.raises(ConfigurationError):
+                read_parquet_files(connections, {"input1": "rid"}, "/tmp")
+
+    def test_read_parquet_files_pandas_draft_reads_only_the_limited_rows(self):
+        """A pandas draft build reads batch by batch across row groups and never loads the whole file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rid = "test-rid"
+            os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
+            pl.DataFrame({"a": range(100), "b": [str(i) for i in range(100)]}).write_parquet(
+                os.path.join(temp_dir, "data", rid, "datasets", "data.parquet"), row_group_size=7
+            )
+            connections = {"input1": Connection(id=rid, path="test.py", inputs=[])}
+
+            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch(
+                'pandas.read_parquet', side_effect=AssertionError("loaded the whole file")
+            ):
+                with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "20"}):
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                    assert list(result["a"]) == list(range(20))
+
+                with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "500"}):
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                    assert len(result) == 100 and list(result.columns) == ["a", "b"]
 
     def test_read_parquet_files_explicit_rid_fallback(self):
         """Test that explicit RIDs can fall back while others cannot."""

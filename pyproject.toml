@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyrunner-lib"
-version = "0.6.0"
+version = "0.6.1"
 authors = [
   { name="DataSpace", email="info@dataspace.ch" },
 ]
@@ -23,7 +23,7 @@ dependencies = [
 dev = [
     "pytest>=9.0.3",
     "pytest-cov>=4.0.0",
-    "black>=26.3.1",
+    "black>=26.10.1",
     "pygments>=2.20.0",
     "isort>=5.12.0",
     "mypy>=1.0.0",

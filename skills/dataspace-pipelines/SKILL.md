@@ -9,7 +9,7 @@ Develop DataSpace transforms while preserving pipeline wiring, lineage, persiste
 
 ## Compatibility
 
-This skill describes `pyrunner-lib==0.6.0` running on DataSpace 1.13. A project declares its version as the `pyrunner-lib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
+This skill describes `pyrunner-lib==0.6.1` running on DataSpace 1.13.1. A project declares its version as the `pyrunner-lib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
 
 ## Workflow
 
@@ -61,7 +61,7 @@ Git access goes over HTTPS with the user's DataSpace email and password and need
 - For health checks, return `(dataframe, checks)`, register checks with `Check` builders, and choose `severity="fail"` only when a failed check should fail the build.
 - For incremental transforms, treat `PREVIOUS_DATASET_PATH` as the previous generated dataset file path and guard for a missing previous build.
 - Read workspace secrets from environment variables named by their key in the workspace settings. Never hardcode a secret, print it, or write it to a dataset, artifact, or log.
-- A draft build runs uncommitted code on the first 1,000,000 rows of each input, and committed builds never read its output. Do not treat its row counts as final.
+- A draft build runs uncommitted code on the first `draftReadLimit` rows of each input (`_config.json`, 1,000,000 by default, `-1` for all rows), and committed builds never read its output. Do not treat its row counts as final.
 - DataSpace supports bare transform parameters, explicit `Transform("rid.transform...")` parameter annotations, and explicit `@transform(input=Transform("rid.transform..."))` decorator bindings for both local and linked foreign-workspace inputs. Read the connection-mapping section of [references/pipeline-runtime.md](references/pipeline-runtime.md) before declaring inputs from another workspace.
 - A bare name is suitable when name-based resolution is unambiguous. Use an explicit RID annotation or decorator binding when a foreign workspace can contain a same-named transform. Workspace-qualified `Transform("WORKSPACE.transform")` references are planned but are not yet a supported replacement for the RID.
 - Consult the current [DataSpace documentation index](https://docs.dataspace.ch/llms.txt) when repository behavior and bundled guidance disagree; prefer current official documentation, then verify against the installed `pyrunner-lib` version.

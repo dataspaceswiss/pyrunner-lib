@@ -134,6 +134,8 @@ CONNECTIONS_FILE = "_connections.json"
 CONFIG: Config | None = None
 CONNECTIONS: list[Connection] | None = None
 DF_TYPE: str | None = None
+DEFAULT_DRAFT_READ_LIMIT = 1_000_000
+NO_DRAFT_READ_LIMIT = -1
 DS_META_DATA: dict[str, dict[str, Any]] | None = None
 
 
@@ -430,6 +432,19 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
     print(f"Execution Time: {time.time() - start_time:.2f} sec")
 
 
+def _read_parquet_head(file_path: str, limit: int) -> pd.DataFrame:
+    """The first `limit` rows as pandas, read batch by batch instead of loading the whole file."""
+    parquet = pq.ParquetFile(file_path)
+    batches = []
+    remaining = limit
+    for batch in parquet.iter_batches(batch_size=min(limit, 65_536)):
+        batches.append(batch.slice(0, remaining))
+        remaining -= batches[-1].num_rows
+        if remaining == 0:
+            break
+    return pa.Table.from_batches(batches, schema=parquet.schema_arrow).to_pandas()
+
+
 def read_parquet_files(
     connections: dict[str, Connection],
     params: list[str] | dict[str, str],
@@ -455,6 +470,25 @@ def read_parquet_files(
     conn_by_id = {conn.id: conn for conn in connections.values()}
     conn_by_name = connections  # Already keyed by path stem
 
+    # A draft build reads only the first rows of each input; a workspace can change how many, or turn the limit off
+    # with -1 (_config.json draftReadLimit)
+    draft_read_limit = None
+    if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true":
+        raw_limit = os.environ.get("DRAFT_READ_LIMIT", str(DEFAULT_DRAFT_READ_LIMIT))
+        try:
+            draft_read_limit = int(raw_limit)
+        except ValueError as e:
+            raise ConfigurationError(
+                f"DRAFT_READ_LIMIT must be a whole number of rows, got {raw_limit!r}."
+            ) from e
+    if draft_read_limit == NO_DRAFT_READ_LIMIT:
+        draft_read_limit = None
+    # pandas reads head(-n) as "all but the last n rows", so any other non-positive limit must not get that far
+    elif draft_read_limit is not None and draft_read_limit < 1:
+        raise ConfigurationError(
+            f"DRAFT_READ_LIMIT must be a positive number of rows or {NO_DRAFT_READ_LIMIT} for no limit, got {draft_read_limit}."
+        )
+
     for param_name, mapping_key in param_mapping.items():
         # Try finding by ID first (RID), then by name
         conn = conn_by_id.get(mapping_key) or conn_by_name.get(mapping_key)
@@ -475,12 +509,12 @@ def read_parquet_files(
             df: pl.LazyFrame | pd.DataFrame
             if DF_TYPE == "polars":
                 df = pl.scan_parquet(file_path)
+                if draft_read_limit is not None:
+                    df = df.head(draft_read_limit)  # lazy: only these rows are ever read
+            elif draft_read_limit is not None:
+                df = _read_parquet_head(file_path, draft_read_limit)
             else:
                 df = pd.read_parquet(file_path, engine="pyarrow")
-
-            # Limit rows if IS_DRAFT_BUILD is set to true
-            if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true":
-                df = df.head(1_000_000)
 
             # Inject ds_meta attribute into the dataframe
             if transform_id is not None:
