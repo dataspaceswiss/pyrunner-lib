@@ -134,6 +134,7 @@ CONNECTIONS_FILE = "_connections.json"
 CONFIG: Config | None = None
 CONNECTIONS: list[Connection] | None = None
 DF_TYPE: str | None = None
+DEFAULT_DRAFT_READ_LIMIT = 1_000_000
 DS_META_DATA: dict[str, dict[str, Any]] | None = None
 
 
@@ -455,6 +456,13 @@ def read_parquet_files(
     conn_by_id = {conn.id: conn for conn in connections.values()}
     conn_by_name = connections  # Already keyed by path stem
 
+    # A draft build reads only the first rows of each input; a workspace can change how many (_config.json draftReadLimit)
+    draft_read_limit = (
+        int(os.environ.get("DRAFT_READ_LIMIT", DEFAULT_DRAFT_READ_LIMIT))
+        if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true"
+        else None
+    )
+
     for param_name, mapping_key in param_mapping.items():
         # Try finding by ID first (RID), then by name
         conn = conn_by_id.get(mapping_key) or conn_by_name.get(mapping_key)
@@ -478,9 +486,8 @@ def read_parquet_files(
             else:
                 df = pd.read_parquet(file_path, engine="pyarrow")
 
-            # Limit rows if IS_DRAFT_BUILD is set to true
-            if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true":
-                df = df.head(1_000_000)
+            if draft_read_limit is not None:
+                df = df.head(draft_read_limit)
 
             # Inject ds_meta attribute into the dataframe
             if transform_id is not None:

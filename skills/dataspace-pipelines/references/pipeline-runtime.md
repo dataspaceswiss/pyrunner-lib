@@ -108,6 +108,7 @@ A formatter or lint configuration in the repository, the project's own conventio
 
 - `python` and `packages` define the image every build of the workspace runs in. A change to them makes the next build create a new image first, which takes noticeably longer than a normal build. Keep `pyrunner-lib` in `packages`, pinned to a tag.
 - `dfType` decides the input type for every transform of the workspace. Keep `polars` unless the repository already uses `pandas`.
+- `draftReadLimit` is optional: the number of rows a draft build reads from each input (1,000,000 when unset). It needs `pyrunner-lib` 0.6.1 or later; 0.6.0 always reads 1,000,000.
 
 ## Connection mapping
 
@@ -199,6 +200,7 @@ Use the exact paths injected by DataSpace.
 | `PREVIOUS_ARTIFACT_FOLDER` | Previous build's artifact directory. |
 | `DS_META` | JSON with the metadata of every input; read it through `ds_meta` instead. |
 | `IS_DRAFT_BUILD` | `true` for a draft build. |
+| `DRAFT_READ_LIMIT` | Rows a draft build reads from each input, when `_config.json` sets `draftReadLimit`. |
 | One variable per workspace secret | Named by the secret's key in the workspace settings. |
 
 The `PREVIOUS_*` variables are set only when the transform has an earlier successful, non-draft build on the same branch. That build's data can have expired under the retention policy, so check that the file exists before reading it.
@@ -207,7 +209,7 @@ Files outside the transform build directory are ephemeral and are not persisted.
 
 ## Draft builds
 
-A build of code that is not committed yet is a draft. Each input is cut to its first 1,000,000 rows. Its output is read only by other draft builds, never by a committed build, and it is never the previous build of a later run. Use a draft to try a change, and a committed build for results that count.
+A build of code that is not committed yet is a draft. Each input is cut to its first `draftReadLimit` rows (1,000,000 unless `_config.json` sets another number). Its output is read only by other draft builds, never by a committed build, and it is never the previous build of a later run. Use a draft to try a change, and a committed build for results that count.
 
 ## Input metadata and upstream artifacts
 
