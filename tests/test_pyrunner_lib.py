@@ -323,6 +323,36 @@ class TestReadParquetFiles:
                 result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
                 assert len(result.collect()) == 4
 
+    def test_read_parquet_files_draft_limit_must_be_positive(self):
+        """A zero or negative limit is refused; pandas would read head(-n) as all but the last n rows."""
+        connections = {"input1": Connection(id="rid", path="test.py", inputs=[])}
+        for limit in ("0", "-2"):
+            with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": limit}), patch(
+                'pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'
+            ), pytest.raises(ConfigurationError):
+                read_parquet_files(connections, {"input1": "rid"}, "/tmp")
+
+    def test_read_parquet_files_pandas_draft_reads_only_the_limited_rows(self):
+        """A pandas draft build reads batch by batch across row groups and never loads the whole file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rid = "test-rid"
+            os.makedirs(os.path.join(temp_dir, "data", rid, "datasets"), exist_ok=True)
+            pl.DataFrame({"a": range(100), "b": [str(i) for i in range(100)]}).write_parquet(
+                os.path.join(temp_dir, "data", rid, "datasets", "data.parquet"), row_group_size=7
+            )
+            connections = {"input1": Connection(id=rid, path="test.py", inputs=[])}
+
+            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch(
+                'pandas.read_parquet', side_effect=AssertionError("loaded the whole file")
+            ):
+                with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "20"}):
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                    assert list(result["a"]) == list(range(20))
+
+                with patch.dict(os.environ, {"IS_DRAFT_BUILD": "true", "DRAFT_READ_LIMIT": "500"}):
+                    result = read_parquet_files(connections, {"input1": rid}, temp_dir)["input1"]
+                    assert len(result) == 100 and list(result.columns) == ["a", "b"]
+
     def test_read_parquet_files_explicit_rid_fallback(self):
         """Test that explicit RIDs can fall back while others cannot."""
         with tempfile.TemporaryDirectory() as temp_dir:
