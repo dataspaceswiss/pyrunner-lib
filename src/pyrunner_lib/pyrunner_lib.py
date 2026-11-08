@@ -401,8 +401,9 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
             param_mapping[name] = name
 
     # A lazy query only runs when its output is written, so reading, transforming
-    # and writing cannot be timed separately
-    start_time = time.time()
+    # and writing are timed together; health checks run afterwards on the written
+    # file and get their own timer
+    start_time = time.perf_counter()
 
     # Read input data
     data_dict = read_parquet_files(
@@ -422,14 +423,16 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
     # Write output
     output_path = f"{base_path}/data/{transform_conn.id}/datasets/data.parquet"
     write_df_to_parquet(result, output_path, transform_conn.id, base_path)
+    print(f"Execution Time: {time.perf_counter() - start_time:.2f} sec")
 
     # Checks run on the written file: re-running the transform for every check is
     # slower, and its row order may differ from the file's
     if health_checks:
+        checks_start = time.perf_counter()
         run_health_checks(output_path, health_checks)
+        print(f"Health Check Time: {time.perf_counter() - checks_start:.2f} sec")
 
     print("--------- Build successful ---------")
-    print(f"Execution Time: {time.time() - start_time:.2f} sec")
 
 
 def _read_parquet_head(file_path: str, limit: int) -> pd.DataFrame:
