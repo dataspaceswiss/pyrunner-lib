@@ -261,7 +261,7 @@ class TestReadParquetFiles:
             with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), patch('pyrunner_lib.pyrunner_lib.pl.scan_parquet') as mock_scan:
                 mock_scan.return_value = pl.LazyFrame({"a": [1, 2, 3]})
                     
-                result = read_parquet_files(connections, ["input1"], temp_dir)
+                result = read_parquet_files(connections, {"input1": "input1"}, temp_dir)
                     
                 assert "input1" in result
                 mock_scan.assert_called_once()
@@ -285,7 +285,7 @@ class TestReadParquetFiles:
             with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch('pyrunner_lib.pyrunner_lib.pd.read_parquet') as mock_read:
                 mock_read.return_value = pd.DataFrame({"a": [1, 2, 3]})
                     
-                result = read_parquet_files(connections, ["input1"], temp_dir)
+                result = read_parquet_files(connections, {"input1": "input1"}, temp_dir)
                     
                 assert "input1" in result
                 mock_read.assert_called_once()
@@ -295,7 +295,7 @@ class TestReadParquetFiles:
         connections = {}
         
         with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'polars'), pytest.raises(DataLoadError, match="Input parameter 'missing' not found"):
-            read_parquet_files(connections, ["missing"], "/tmp")
+            read_parquet_files(connections, {"missing": "missing"}, "/tmp")
 
     def test_read_parquet_files_draft_build_limit(self):
         """A draft build cuts each input to DRAFT_READ_LIMIT rows; other builds read everything."""
@@ -393,7 +393,7 @@ class TestReadParquetFiles:
     def test_read_parquet_files_configuration_not_loaded(self):
         """Test reading parquet files without configuration."""
         with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', None), pytest.raises(ConfigurationError, match="Configuration not loaded"):
-            read_parquet_files({}, [], "/tmp")
+            read_parquet_files({}, {}, "/tmp")
 
 
 class TestTransform:
